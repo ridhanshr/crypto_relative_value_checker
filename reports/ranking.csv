@@ -1,3 +1,0 @@
-timestamp,long_assets,short_assets,long_count,short_count,rank_overlap
-2026-01-01 00:00:00+00:00,"BTCUSDT,ETHUSDT","SOLUSDT,XRPUSDT",2,2,0
-2026-01-02 00:00:00+00:00,"ETHUSDT,SOLUSDT","BTCUSDT,XRPUSDT",2,2,0

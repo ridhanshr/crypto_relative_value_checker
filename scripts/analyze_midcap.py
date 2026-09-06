@@ -22,34 +22,37 @@ parser.add_argument("--interval", default="1d", choices=["1d", "4h", "1h"])
 args = parser.parse_args()
 
 out = Path(args.output)
+out.mkdir(parents=True, exist_ok=True)
 raw = pd.read_csv(args.input)
 data = canonicalize_assets(raw)
 data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True)
 data["signal"] = data["asset_return"]
 data = data.dropna(subset=["signal"]).reset_index(drop=True)
-counts = data.groupby("asset")["timestamp"].nunique()
-full_count = int(counts.max())
-valid_assets = counts[counts == full_count].index
-data = data[data.asset.isin(valid_assets)].copy()
+coverage = data.groupby("asset").agg(first_seen=("timestamp", "min"), last_seen=("timestamp", "max"), periods=("timestamp", "nunique")).reset_index()
+requested_end = pd.to_datetime(raw.timestamp.max(), utc=True)
+forced_exit_assets = coverage[pd.to_datetime(coverage.last_seen, utc=True) < requested_end - pd.Timedelta(days=7)].copy()
+coverage.to_csv(out.parent / f"{out.name}_universe_manifest.csv", index=False)
 data.to_csv(out.parent / f"{out.name}_canonical.csv", index=False)
 
 frequency = {"1d": "D", "4h": "4h", "1h": "h"}[args.interval]
-preflight = validate_dataset(data, require_funding=args.require_funding, require_liquidity=True, min_assets=6, min_periods=30, expected_frequency=frequency)
+preflight = validate_dataset(data, require_funding=args.require_funding, require_liquidity=True, min_assets=6, min_periods=30, expected_frequency=frequency, allow_gaps=not args.require_funding)
 write_preflight(preflight, out)
 if not preflight["valid"]:
     print(json.dumps(preflight, indent=2))
     raise SystemExit("PREFLIGHT_FAILED")
 
 symbols = sorted(data.asset.unique())
-check_order_book_spread(symbols, output=out / "spread_check.csv")
+spread = check_order_book_spread(symbols, output=out / "spread_check.csv")
 built = build_signals(data)
 tiers = ((0.75, 0.0004, 0.0005), (0.5, 0.0008, 0.001), (0.25, 0.0012, 0.002), (0.0, 0.0015, 0.004))
-base = dict(n_long=3, n_short=3, fee_rate=0.0004, slippage_rate=0.0005, rebalance_every=5, vol_target_annual=0.15, liquidity_column="quote_volume", liquidity_tiers=tiers)
+base = dict(n_long=3, n_short=3, fee_rate=0.0004, slippage_rate=0.0005, rebalance_every=5, vol_target_annual=0.15, liquidity_column="quote_volume", liquidity_tiers=tiers, require_funding=args.require_funding, delist_mode="forced_exit")
 for signal in ("low_vol_14", "low_vol_30", "reversal_1", "resid_reversal_14", "resid_reversal_30"):
     frame = built.dropna(subset=[signal]).reset_index(drop=True)
     result = check_strategy(frame, CheckerConfig(signal_column=signal, **base))
     write_reports(result, out / signal)
 
 wf = walk_forward(data, base_config=CheckerConfig(**base), candidates=("low_vol_14", "low_vol_30", "reversal_1", "resid_reversal_14", "resid_reversal_30"), n_sides_grid=(3,), min_train_days=365, test_days=120, output_dir=out / "walk_forward", vol_target_annual=0.15)
-(out / "analysis_summary.json").write_text(json.dumps({"mode": "futures" if "funding_rate" in data.columns else "price_only", "assets": symbols, "preflight": preflight, "walk_forward": wf}, indent=2, default=str), encoding="utf-8")
-print(json.dumps({"mode": "futures" if "funding_rate" in data.columns else "price_only", "assets": len(symbols), "walk_forward_deployable": wf["deployable"]}, indent=2))
+summary = {"mode": "futures" if "funding_rate" in data.columns else "price_only", "assets": symbols, "preflight": preflight, "spread_check_passed": spread is not None, "spread_required_for_deployment": True, "universe_manifest": coverage.astype(str).to_dict("records"), "forced_exit_assets": forced_exit_assets.astype(str).to_dict("records"), "survivorship_note": preflight.get("survivorship_note"), "walk_forward": wf}
+summary["deployable"] = bool(wf["deployable"] and spread is not None and preflight["valid"])
+(out / "analysis_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+print(json.dumps({"mode": summary["mode"], "assets": len(symbols), "walk_forward_deployable": wf["deployable"], "deployable": summary["deployable"]}, indent=2))

@@ -36,7 +36,7 @@ def _run(frame, cand, cfg, part):
 def walk_forward(data, base_config=None, min_train_days=365, test_days=120, output_dir=None, fee_stress_pairs=None, candidates=None, n_sides_grid=None, vol_target_annual=0.0, vol_target_grid=None):
     base = base_config or CheckerConfig()
     vt_grid = vol_target_grid or (vol_target_annual,)
-    cfg = replace(base, vol_target_annual=vt_grid[0])
+    cfg = replace(base, vol_target_annual=vt_grid[0], enforce_risk_limits=False)
     frame = build_signals(data)
     frame = frame.sort_values(["timestamp", "asset"]).reset_index(drop=True)
     candidates = candidates or available_candidates(frame)
@@ -55,7 +55,15 @@ def walk_forward(data, base_config=None, min_train_days=365, test_days=120, outp
         folds_data.append((train_dates, test_dates))
         cursor += test_days
     fee_stress_pairs = fee_stress_pairs or [(0.0008, 0.001), (0.0015, 0.002)]
-    segments = {"base": [], "stress": {pair: [] for pair in fee_stress_pairs}}
+    tiered = bool(cfg.liquidity_tiers and cfg.liquidity_column)
+    stress_variants = []
+    for pair in fee_stress_pairs:
+        if tiered:
+            multiplier = max(pair[0] / 0.0004, pair[1] / 0.0005)
+            stress_variants.append((f"cost_x_{multiplier:.2f}", {"cost_multiplier": multiplier}))
+        else:
+            stress_variants.append((f"fee_{pair[0]}_slippage_{pair[1]}", {"fee_rate": pair[0], "slippage_rate": pair[1]}))
+    segments = {"base": [], "stress": {name: [] for name, _ in stress_variants}}
     choices = []
     for index, (train_dates, test_dates) in enumerate(folds_data):
         train = frame[frame.timestamp.isin(train_dates)]
@@ -79,14 +87,14 @@ def walk_forward(data, base_config=None, min_train_days=365, test_days=120, outp
         best = max(trials, key=lambda t: t["train_sharpe"])
         test_returns = _run(frame, best["signal"], replace(cfg, n_long=best["n_sides"], n_short=best["n_sides"], vol_target_annual=best["vol_target"]), test)
         segments["base"].append(test_returns)
-        for pair in fee_stress_pairs:
-            stressed = _run(frame, best["signal"], replace(cfg, n_long=best["n_sides"], n_short=best["n_sides"], vol_target_annual=best["vol_target"], fee_rate=pair[0], slippage_rate=pair[1]), test)
-            segments["stress"][pair].append(stressed)
+        for name, overrides in stress_variants:
+            stressed = _run(frame, best["signal"], replace(cfg, n_long=best["n_sides"], n_short=best["n_sides"], vol_target_annual=best["vol_target"], **overrides), test)
+            segments["stress"][name].append(stressed)
         choices.append({**best, "fold": index, "train_end": str(train_dates[-1]), "test_start": str(test_dates[0]), "test_end": str(test_dates[-1]), "test_return": float((1 + test_returns).prod() - 1)})
     base_returns = pd.concat(segments["base"], ignore_index=True)
-    stress_summary = {f"fee_{pair[0]}_slippage_{pair[1]}": _summarize(pd.concat(parts, ignore_index=True)) for pair, parts in segments["stress"].items()}
+    stress_summary = {name: _summarize(pd.concat(parts, ignore_index=True)) for name, parts in segments["stress"].items()}
     folds_profitable = int(sum(1 for c in choices if c["test_return"] > 0))
-    result = {"candidates": candidates, "n_folds": len(folds_data), "folds": choices, "walk_forward": _summarize(base_returns), "cost_stress": stress_summary, "folds_profitable": folds_profitable, "gates": {"wf_positive": _summarize(base_returns)["total_return"] > 0, "wf_sharpe_above_one": _summarize(base_returns)["sharpe"] > 1, "wf_drawdown_above_minus_20pct": _summarize(base_returns)["max_drawdown"] > -0.20, "stress_positive": all(x["total_return"] > 0 for x in stress_summary.values()), "majority_folds_profitable": folds_profitable > len(folds_data) / 2}}
+    result = {"candidates": candidates, "n_folds": len(folds_data), "folds": choices, "walk_forward": _summarize(base_returns), "cost_stress": stress_summary, "folds_profitable": folds_profitable, "state_policy": "fresh_deployment_per_fold; selection-only, live decisions use continuous-equity validation", "gates": {"wf_positive": _summarize(base_returns)["total_return"] > 0, "wf_sharpe_above_one": _summarize(base_returns)["sharpe"] > 1, "wf_drawdown_above_minus_20pct": _summarize(base_returns)["max_drawdown"] > -0.20, "stress_positive": all(x["total_return"] > 0 for x in stress_summary.values()), "majority_folds_profitable": folds_profitable > len(folds_data) / 2}}
     result["deployable"] = all(result["gates"].values())
     if output_dir:
         Path(output_dir).mkdir(parents=True, exist_ok=True)

@@ -6,7 +6,7 @@ from crypto_checker.signal_audit import audit_signals
 from crypto_checker.validation import run_validation
 from crypto_checker.signals import build_signals
 from crypto_checker.selection import walk_forward
-from crypto_checker.assets import canonicalize_assets, audit_asset_continuity, canonical_asset, migration_manifest, audit_migration_discontinuities
+from crypto_checker.assets import canonicalize_assets, audit_asset_continuity, canonical_asset, migration_manifest, audit_migration_discontinuities, audit_migration_collisions
 from crypto_checker.preflight import validate_dataset
 
 
@@ -230,6 +230,13 @@ def test_migration_discontinuity_requires_official_factor():
     assert gaps.iloc[0].status == "REQUIRES_OFFICIAL_FACTOR"
 
 
+def test_migration_collision_is_reported_before_merge():
+    data = pd.DataFrame([["2024-01-01", "MATICUSDT", 1.0], ["2024-01-01", "POLUSDT", 1.0]], columns=["timestamp", "asset", "price"])
+    collisions = audit_migration_collisions(data)
+    assert len(collisions) == 1
+    assert collisions.iloc[0].status == "MIGRATION_COLLISION"
+
+
 def test_official_migration_ratio_adjusts_legacy_price():
     data = pd.DataFrame([["2024-01-01", "GALUSDT", 60.0], ["2024-01-02", "GUSDT", 1.0]], columns=["timestamp", "asset", "price"])
     result = canonicalize_assets(data)
@@ -261,3 +268,75 @@ def test_preflight_rejects_missing_funding_and_duplicates():
     assert result["valid"] is False
     assert any("Duplicate" in error for error in result["errors"])
     assert any("Funding rate" in error for error in result["errors"])
+
+
+def test_capacity_violation_is_reported():
+    data = pd.DataFrame([
+        ["2024-01-01", "A", 100, 2, 100], ["2024-01-01", "B", 100, 1, 100],
+        ["2024-01-02", "A", 100, 1, 100], ["2024-01-02", "B", 100, 2, 100],
+    ], columns=["timestamp", "asset", "price", "signal", "quote_volume"])
+    result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, liquidity_column="quote_volume", liquidity_tiers=((0.0, 0.001, 0.001),), max_volume_participation=0.05))
+    assert result["metrics"]["capacity_violations"] > 0
+
+
+def test_missing_held_price_is_hard_error():
+    data = pd.DataFrame([
+        ["2024-01-01", "A", 100, 2], ["2024-01-01", "B", 100, 1],
+        ["2024-01-02", "B", 100, 2],
+    ], columns=["timestamp", "asset", "price", "signal"])
+    with pytest.raises(ValueError, match="Missing price for held positions"):
+        check_strategy(data, CheckerConfig(n_long=1, n_short=1))
+
+
+def test_cost_multiplier_scales_tiered_fees():
+    dates = [f"2026-01-{d:02d}" for d in range(1, 4)]
+    rows = []
+    for d, ts in enumerate(dates, start=1):
+        top = 4 if d % 2 else -4
+        rows.append([ts, "A", 100, top, 1_000_000.0])
+        rows.append([ts, "B", 100, -top, 100.0])
+    data = pd.DataFrame(rows, columns=["timestamp", "asset", "price", "signal", "quote_volume"])
+    tiers = ((0.5, 0.0004, 0.0005), (0.0, 0.0015, 0.004))
+    base = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0.001, slippage_rate=0.001, liquidity_column="quote_volume", liquidity_tiers=tiers))
+    stressed = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0.001, slippage_rate=0.001, liquidity_column="quote_volume", liquidity_tiers=tiers, cost_multiplier=2.0))
+    assert stressed["pnl"].iloc[0].fee_cost == pytest.approx(2 * base["pnl"].iloc[0].fee_cost)
+    assert stressed["pnl"].iloc[0].slippage_cost == pytest.approx(2 * base["pnl"].iloc[0].slippage_cost)
+    assert stressed["metrics"]["total_fees"] > base["metrics"]["total_fees"]
+
+
+def test_forced_exit_closes_disappeared_holding():
+    data = pd.DataFrame([
+        ["2024-01-01", "A", 100, 2], ["2024-01-01", "B", 100, 1],
+        ["2024-01-02", "B", 100, 2], ["2024-01-02", "C", 100, 1],
+    ], columns=["timestamp", "asset", "price", "signal"])
+    result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, delist_mode="forced_exit"))
+    types = result["violations"]["type"].tolist()
+    assert "forced_exit" in types
+    assert (result["trades"][result["trades"].asset == "A"].weight_change < 0).any()
+
+
+def test_validation_uses_continuous_equity():
+    rng = np.random.default_rng(5)
+    dates = pd.date_range("2024-01-01", periods=120, freq="D", tz="UTC")
+    frames = []
+    for i in range(4):
+        prices = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, len(dates))))
+        frames.append(pd.DataFrame({"timestamp": dates, "asset": f"A{i}", "price": prices, "signal": np.cos(np.arange(len(dates)) + i) * 0.01}))
+    data = pd.concat(frames, ignore_index=True)
+    result = run_validation(data, CheckerConfig(n_long=1, n_short=1))
+    assert result["continuous_equity"] is True
+    from crypto_checker.core import check_strategy as cs
+    full = cs(data, CheckerConfig(n_long=1, n_short=1))
+    oos_end = float(full["pnl"].equity.iloc[-1])
+    assert result["performance"]["out_of_sample"]["final_equity"] == pytest.approx(oos_end)
+    assert result["survivorship_note"]
+
+
+def test_preflight_flags_delisting_suspects():
+    data = pd.DataFrame([
+        ["2024-01-01", "A", 100, 1], ["2024-01-10", "A", 100, 1],
+        ["2024-01-01", "B", 100, 2], ["2024-01-30", "B", 100, 2],
+    ], columns=["timestamp", "asset", "price", "signal"])
+    result = validate_dataset(data, min_assets=2, min_periods=2)
+    assert any("Delisting" in warning for warning in result["warnings"])
+    assert len(result["delisting_suspects"]) == 1

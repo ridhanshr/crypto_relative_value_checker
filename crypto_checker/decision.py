@@ -10,7 +10,7 @@ from .selection import walk_forward
 REGIME_MIN_PROFIT = 0.5
 
 
-def deployment_decision(data, output_dir="reports/research", min_train_days=365, test_days=120, candidates=None, n_sides_grid=(3,), vol_target_annual=0.20, rebalance_every=5, fee_rate=0.0004, slippage_rate=0.0005):
+def deployment_decision(data, output_dir="reports/research", min_train_days=365, test_days=120, candidates=None, n_sides_grid=(3,), vol_target_annual=0.20, rebalance_every=5, fee_rate=0.0004, slippage_rate=0.0005, require_funding=False, spread_check_passed=False):
     from .signals import build_signals, available_candidates
     built = build_signals(data)
     all_candidates = available_candidates(built)
@@ -25,10 +25,10 @@ def deployment_decision(data, output_dir="reports/research", min_train_days=365,
         if not pd.isna(row["ic_tstat"]) and abs(row["ic_tstat"]) >= 2.0:
             ic_pass.append(row["signal"])
 
-    wf = walk_forward(data, base_config=CheckerConfig(fee_rate=fee_rate, slippage_rate=slippage_rate, rebalance_every=rebalance_every), min_train_days=min_train_days, test_days=test_days, candidates=wf_candidates, n_sides_grid=n_sides_grid, vol_target_annual=vol_target_annual, output_dir=output_dir)
+    wf = walk_forward(data, base_config=CheckerConfig(fee_rate=fee_rate, slippage_rate=slippage_rate, rebalance_every=rebalance_every, require_funding=require_funding), min_train_days=min_train_days, test_days=test_days, candidates=wf_candidates, n_sides_grid=n_sides_grid, vol_target_annual=vol_target_annual, output_dir=output_dir)
     best_signal = pd.Series([f["signal"] for f in wf["folds"]]).mode().iloc[0]
     best_n = int(pd.Series([f["n_sides"] for f in wf["folds"]]).mode().iloc[0])
-    config = CheckerConfig(n_long=best_n, n_short=best_n, fee_rate=fee_rate, slippage_rate=slippage_rate, signal_column=best_signal, vol_target_annual=vol_target_annual, rebalance_every=rebalance_every)
+    config = CheckerConfig(n_long=best_n, n_short=best_n, fee_rate=fee_rate, slippage_rate=slippage_rate, signal_column=best_signal, vol_target_annual=vol_target_annual, rebalance_every=rebalance_every, require_funding=require_funding)
     validation = run_validation(built.dropna(subset=[best_signal]).reset_index(drop=True), config, output_dir=output_dir)
 
     regime_rows = validation["regimes"]
@@ -47,6 +47,8 @@ def deployment_decision(data, output_dir="reports/research", min_train_days=365,
         "static_oos_drawdown_gate": validation["gates"]["oos_drawdown_above_minus_20pct"],
         "static_stress_positive": validation["gates"]["stress_positive"],
         "no_risk_violations": validation["gates"]["no_risk_violations"],
+        "no_capacity_violations": validation["gates"].get("no_capacity_violations", False),
+        "spread_check_passed": bool(spread_check_passed),
         "majority_regimes_profitable": bool(profitable_regimes >= len(regime_rows) * REGIME_MIN_PROFIT),
     }
     decision = {

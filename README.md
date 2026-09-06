@@ -1,24 +1,25 @@
 # Crypto Relative-Value Checker
 
-Sistem ini dipakai untuk menguji strategi trading crypto long-short secara lebih hati-hati.
+Sistem untuk menguji strategi trading crypto long-short secara hati-hati.
 
-Sistem membandingkan banyak coin pada waktu yang sama. Coin dengan sinyal paling kuat dibeli atau **long**. Coin dengan sinyal paling lemah dijual atau **short**. Karena posisi long dan short dibuat bersamaan, tujuan strategi adalah mencari perbedaan performa antar-coin, bukan menebak arah seluruh market.
+Sistem membandingkan banyak coin pada waktu yang sama. Coin dengan sinyal paling kuat dibeli (**long**). Coin dengan sinyal paling lemah dijual (**short**). Karena posisi long dan short dibuat bersamaan, tujuan strategi adalah mencari perbedaan performa antar-coin, bukan menebak arah seluruh market.
 
 Sistem menghitung:
 
 - PnL dari perubahan harga.
 - PnL funding rate futures.
-- Fee transaksi.
+- Fee transaksi (flat atau bertingkat per likuiditas).
 - Slippage.
-- Turnover.
+- Turnover dan capacity check.
 - Exposure long, short, gross, dan net.
-- Sharpe ratio.
-- Volatilitas.
-- Maximum drawdown.
-- Risk violation.
-- Performa pada kondisi market berbeda.
+- Sharpe ratio (dengan koreksi multiple-testing).
+- Volatilitas dan vol-targeting overlay.
+- Maximum drawdown dari equity awal.
+- Risk violation (daily loss, max drawdown, capacity, forced exit).
+- Performa per rezim market (bull/bear/sideways x high/low vol).
+- Benchmark: equal-weight, BTC, ETH, long-only, market-neutral reference.
 
-Sistem **tidak menjamin profit**. `DEPLOYABLE=True` hanya boleh muncul jika seluruh pemeriksaan risiko dan validasi berhasil.
+Sistem **tidak menjamin profit**. `DEPLOYABLE=True` hanya muncul jika seluruh pemeriksaan dan validasi berhasil. Jangan pernah melonggarkan gate agar hasil menjadi `True`.
 
 ## Flow Visual
 
@@ -26,192 +27,69 @@ Sistem **tidak menjamin profit**. `DEPLOYABLE=True` hanya boleh muncul jika selu
 
 ## Flow Sistem
 
-Alur utama sistem:
-
 ```text
-Download data
+Download data (klines 1d/4h/1h + funding monthly/API)
     |
     v
-Preflight validation
+Preflight validation (+ universe manifest, delisting suspects)
     |
     v
-Canonical asset mapping
+Canonical asset mapping (+ migration collision check, official price factors)
     |
     v
-Signal audit
+Signal audit + factor library (15 kandidat)
     |
     v
-Hitung signal
+Ranking long-short (equal weight, vol-targeting, rebalance filter)
     |
     v
-Ranking long-short
+Simulasi execution dan PnL (fee/slippage tiered, funding, capacity limit)
     |
     v
-Simulasi execution dan PnL
+Validation train/validation/OOS dengan CONTINUOUS equity
     |
     v
-Validasi train / validation / out-of-sample
+Walk-forward + regime test + reality check (Newey-West, bootstrap, Bonferroni)
     |
     v
-Walk-forward dan regime test
+Cost stress (multiplier saat tiered) + risk/capacity/spread gate
     |
     v
-Cost stress dan risk gate
-    |
-    v
-Deployment decision
+Deployment decision (fail-closed)
 ```
 
-### 1. Download Data
-
-Downloader mengambil data futures Binance Vision.
-
-Data yang diambil:
-
-- Harga OHLC.
-- Volume.
-- Quote volume.
-- Funding rate.
-- Signal dasar dari return harga.
-
-Setiap URL yang sedang diproses ditampilkan di terminal. Jika file gagal diambil, sistem menampilkan `SKIP`.
-
-### 2. Preflight Validation
-
-Sebelum backtest dimulai, sistem mengecek:
-
-- Kolom wajib tersedia.
-- Timestamp valid.
-- Harga lebih besar dari nol.
-- Signal bukan `NaN` atau `inf`.
-- Funding rate lengkap jika strategi memakai futures.
-- Tidak ada duplicate `(timestamp, asset)`.
-- Coverage tanggal tiap asset.
-- Quote volume tersedia untuk cost model midcap.
-- Tidak ada masalah migration token.
-
-Hasil preflight disimpan dalam:
+## Struktur Proyek
 
 ```text
-reports/<nama_report>/preflight.json
+crypto_checker/
+  core.py            # mesin backtest: ranking, PnL, fee/slippage, vol-targeting, capacity
+  binance_vision.py  # downloader klines 1d/4h/1h + funding (arsip bulanan + fallback API)
+  assets.py          # canonical mapping + migration factors + continuity audit
+  preflight.py       # validasi dataset sebelum backtest (fail-fast)
+  signals.py         # pustaka 15 faktor (momentum, reversal, carry, low-vol, combo z-score)
+  signal_audit.py    # cek signal konstan / forward-fill / kumulatif
+  research.py        # rank-IC, t-stat, Newey-West, bootstrap CI, quantile return
+  reality_check.py   # koreksi multiple-testing (Bonferroni), utilitas statistik
+  validation.py      # split train/val/OOS continuous-equity, regime, benchmark, stress
+  selection.py       # walk-forward selection bebas leakage
+  decision.py        # keputusan deployment gabungan semua gate
+  spread_check.py    # ukur spread bid-ask riil dari order book Binance
+  cli.py             # command-line interface
+scripts/
+  download_midcap.py # unduh dataset per sektor (l1_l2, defi, oracle_infra, gaming, meme, legacy, mega)
+  download_binance_sample.py
+  analyze_midcap.py  # pipeline analisis midcap end-to-end (preflight, spread, signal, WF)
+tests/
+  test_core.py       # 33 regression test
 ```
-
-Jika validasi gagal, sistem berhenti. Data yang rusak tidak diteruskan ke checker.
-
-### 3. Canonical Asset Mapping
-
-Beberapa token pernah berganti nama. Sistem menyatukan history lama dan baru agar tidak dianggap sebagai dua coin berbeda.
-
-Mapping yang tersedia:
-
-```text
-GALUSDT     -> GUSDT
-OMNIUSDT    -> NOMUSDT
-MATICUSDT   -> POLUSDT
-NANOUSDT    -> XNOUSDT
-VENUSDT     -> VETUSDT
-BCCUSDT     -> BCHUSDT
-ANTOLDUSDT  -> ANTUSDT
-```
-
-Symbol asli tetap disimpan pada kolom `source_asset`. Nama canonical disimpan pada kolom `asset`.
-
-Jika migration membuat lonjakan harga yang tidak wajar dan faktor resminya belum tersedia, sistem menolak dataset.
-
-### 4. Signal
-
-Sistem menyediakan beberapa signal:
-
-- `momentum_7`
-- `momentum_14`
-- `momentum_30`
-- `vol_adj_momentum_14`
-- `vol_adj_momentum_30`
-- `reversal_1`
-- `resid_reversal_14`
-- `resid_reversal_30`
-- `low_vol_14`
-- `low_vol_30`
-- `carry`
-- `funding_surprise`
-- `vol_adj_carry`
-- `carry_mom_z`
-- `carry_lowvol_z`
-
-Signal selalu dihitung menggunakan data yang sudah tersedia pada waktu tersebut. Sistem tidak boleh memakai data masa depan.
-
-Definisi lag tetap:
-
-```text
-Signal pada candle t digunakan untuk posisi periode t sampai t+1.
-```
-
-### 5. Ranking dan Portfolio
-
-Pada setiap timestamp:
-
-- Asset dengan ranking signal tertinggi masuk long.
-- Asset dengan ranking signal terendah masuk short.
-- Bobot dibagi equal-weight.
-- Gross exposure dan net exposure dicatat.
-
-Contoh konfigurasi:
-
-```text
-3 asset long
-3 asset short
-gross exposure = 2.0
-net exposure = 0.0
-```
-
-### 6. PnL dan Biaya
-
-PnL terdiri dari:
-
-```text
-total PnL = price PnL + funding PnL - fee - slippage
-```
-
-Untuk asset midcap, sistem dapat memakai biaya berdasarkan likuiditas. Asset dengan quote volume rendah mendapat fee dan slippage lebih tinggi.
-
-Preset biaya:
-
-```text
-midcap:
-top liquidity       = 4 bps fee + 5 bps slippage
-middle liquidity    = 8-12 bps fee + 10-20 bps slippage
-low liquidity       = 15 bps fee + 40 bps slippage
-```
-
-Biaya entry dan rebalance sama-sama dihitung.
-
-### 7. Validation
-
-Data dibagi menjadi tiga bagian:
-
-```text
-train          = 60%
-validation     = 20%
-out-of-sample  = 20%
-```
-
-Parameter tidak boleh dipilih menggunakan data out-of-sample.
-
-Sistem juga menjalankan:
-
-- Cost stress test.
-- Walk-forward test.
-- Market regime test.
-- Benchmark equal-weight.
-- Risk violation check.
 
 ## Instalasi
-
-Pastikan Python sudah terpasang. Install dependency:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
+
+Dependency: `pandas`, `numpy`, `pytest`.
 
 Jalankan test:
 
@@ -219,9 +97,9 @@ Jalankan test:
 python -m pytest tests -q
 ```
 
-## Download Dataset Midcap
+## Download Data
 
-Download dataset daily dua tahun dengan beberapa kategori coin:
+Dataset utama (daily 2 tahun, semua sektor + mega-cap sebagai reference):
 
 ```bash
 python scripts\download_midcap.py ^
@@ -233,33 +111,88 @@ python scripts\download_midcap.py ^
   --include-mega
 ```
 
-`--include-mega` menambahkan coin besar seperti BTC dan ETH. Coin tersebut berguna sebagai reference asset dan benchmark.
+Interval yang didukung: `1d`, `4h`, `1h`. Untuk `1h`/`4h`, funding di-merge per candle tepat (event funding 8-jam-an menempel pada candle-nya); untuk `1d`, funding harian dijumlah dari 3 settlement. Guard lookahead menolak event yang settle setelah candle close.
 
-Untuk data per jam:
+Aturan funding downloader (fail-closed):
+
+- Bulan lengkap: arsip bulanan Binance Vision.
+- Bulan berjalan (arsip belum terbit): fallback API `fapi.binance.com` dengan pagination.
+- Keduanya gagal: error eksplisit berisi daftar `(simbol, bulan)` yang hilang + saran (set `--end` ke bulan lengkap terakhir), dan file partial + manifest disimpan di samping output. **Tidak ada funding yang diam-diam diisi nol.**
+
+Downloader mencatat setiap URL (`DOWNLOAD`/`SKIP`) dan simbol yang hilang/rename (mis. MATICUSDT -> POLUSDT) terlihat jelas di log.
+
+### Troubleshooting koneksi Binance
+
+Endpoint `data.binance.vision` dan `fapi.binance.com` kadang timeout / terblokir DNS bawaan ISP. Solusi yang terbukti: ganti DNS ke Cloudflare.
+
+- Preferred DNS: `1.1.1.1`
+- Alternate DNS: `1.0.0.1`
+
+Cara (Windows): Settings > Network > adapter aktif > Properties > IPv4 > Use the following DNS server addresses > isi `1.1.1.1` dan `1.0.0.1` > OK, lalu ulangi download. Jika masih gagal, script mencetak `SPREAD_CHECK_UNAVAILABLE` / `SKIP` per file — jangan lanjutkan analisis seolah data lengkap.
+
+## Preflight Validation
+
+Sebelum backtest, `preflight.json` memeriksa: kolom wajib, timestamp UTC, harga positif-finite, signal numerik-finite, funding wajib lengkap (mode futures), `quote_volume` (mode midcap), duplikat, jumlah aset/periode minimum, gap timestamp, diskontinuitas migrasi, dan tabrakan migrasi. Output tambahan:
+
+- `universe_membership`: kehadiran tiap aset per timestamp.
+- `asset_status`: first/last seen + status (`active_full_period` / `partial_history_or_delisted`).
+- `delisting_suspects`: aset yang berhenti jauh sebelum tanggal akhir — hari terakhirnya wajib diperlakukan sebagai forced exit, bukan dibuang diam-diam.
+- `survivorship_note`: universe berasal dari simbol aktif saat ini; tanpa verifikasi membership independen, hasil berpotensi bias survivorship yang belum terukur.
+
+Mode eksplorasi `price_only` mentoleransi gap kecil (jadi warning + forced exit di backtest); mode futures menolak gap apa pun.
+
+## Canonical Asset Mapping
+
+Token yang pernah ganti nama disatukan agar history tidak pecah. Kolom `source_asset` menyimpan simbol asli untuk audit.
+
+| Legacy | Canonical | Ratio resmi | Effective date (UTC) |
+|---|---|---|---|
+| GAL | G | 1 GAL = 60 G | 2024-07-19 08:00 |
+| OMNI | NOM | 1 OMNI = 75 NOM | 2025-10-01 08:00 |
+| MATIC | POL | 1 MATIC = 1 POL | 2024-09-13 10:00 |
+| NANO | XNO | 1 NANO = 1 XNO | 2022-01-28 04:00 |
+| VEN | VET | 1 VEN = 100 VET | 2018-07-25 04:00 |
+| BCC | BCH | (faktor resmi belum terverifikasi) | - |
+| ANTOLD | ANT | (faktor resmi belum terverifikasi) | - |
+
+Aturan keras: overlap dua source symbol pada timestamp yang sama (`MIGRATION_COLLISION`) menghentikan run; faktor harga hanya diterapkan sebelum effective date (`adjusted = old_price / ratio`); rasio tanpa sumber resmi tidak ditebak — tetap `None` dan memicu error bila diskontinuitas terdeteksi.
+
+## Signal (15 kandidat, semua point-in-time)
+
+Momentum (skip 1 hari terakhir): `momentum_7/14/30`, `vol_adj_momentum_14/30`. Reversal: `reversal_1`, `resid_reversal_14/30` (residu terhadap beta BTC trailing). Low-vol anomaly: `low_vol_14/30`. Carry/funding: `carry` (-funding), `funding_surprise`, `vol_adj_carry`. Kombinasi z-score cross-sectional: `carry_mom_z`, `carry_lowvol_z`.
+
+Definisi lag tetap: signal candle `t` dipakai untuk posisi periode `t -> t+1`. Tidak ada data masa depan.
+
+## Mesin Backtest (core)
+
+- Ranking cross-sectional long top / short bottom, equal weight, gross default 2.0 / net 0.0.
+- `signal_lookback` (smoothing per aset), `min_signal_gap` (tahan posisi bila gap ranking tipis), `rebalance_every`.
+- Vol-targeting: `vol_target_annual` (0 = mati); skala = min(1, target_harian / realized_30d); masa warm-up tanpa riwayat memakai `vol_warmup_scale` 0.5.
+- Biaya masuk (entry) dan rebalance sama-sama dikenakan. Mode flat (`fee_rate`/`slippage_rate`) atau bertingkat per likuiditas (`liquidity_column=quote_volume`, `liquidity_tiers`, `liquidity_lookback`). `cost_multiplier` mengalikan semua biaya (dipakai cost stress).
+- Capacity: order di atas `quote_volume x max_volume_participation` dicatat sebagai violation `capacity_limit` (masuk `capacity.csv` + gate). Baris dengan volume invalid dicatat `invalid_liquidity` dan asetnya tidak bisa dipegang.
+- Delisting: default `delist_mode="error"` (hard fail bila harga posisi hilang); `"forced_exit"` menutup posisi di harga terakhir (PnL periode terakhir 0, exit tetap kena biaya) dan mencatatnya — dipakai analisis eksplorasi midcap.
+- Funding: long membayar bila funding positif (`funding_positive_paid_by_long`, bisa dibalik untuk eksperimen); `require_funding=True` menolak input tanpa kolom funding.
+- Risk limit: `daily_loss_limit`, `max_drawdown_limit` (diukur dari equity awal, konsisten dengan metrik akhir); `--enforce-risk-limits` menghentikan run saat breach (mode produksi).
+- Drawdown metrik dihitung dari equity awal (bukan dari equity berjalan), supaya konsisten dengan tracking intra-loop.
+
+## Validation, Walk-Forward, Reality Check
+
+- Split 60/20/20 dengan **continuous equity**: satu pass penuh, metrik tiap segmen dihitung dari equity awal segmen (`oos return = equity_akhir / equity_awal - 1`), bukan reset modal. Field `continuous_equity: true`.
+- Cost stress: mode flat memakai tier absolut (4+5bps s/d 15+40bps); mode tiered memakai multiplier (`cost_x_2.00`, `cost_x_4.00`) supaya stress benar-benar berpengaruh.
+- Walk-forward: seleksi signal x n_sides x vol-target hanya dari train tiap fold; test fold beku. `state_policy` terdokumentasi (fresh deployment per fold, khusus seleksi; keputusan live memakai validasi continuous-equity).
+- Reality check: tiap baris `factor_ic` memuat `ic_tstat`, `nw_tstat` (Newey-West), bootstrap CI 95%, `adjusted_pvalue` (Bonferroni); gate `best_ic_tstat > 3.0`.
+- Benchmark OOS: equal-weight, BTC, ETH, long-only equal-weight, market-neutral reference.
+- Regime dari BTC 30-hari: bull/bear/sideways x hi/lo vol.
+
+## Spread Check
 
 ```bash
-python scripts\download_midcap.py ^
-  --start 2024-01-01 ^
-  --end 2026-08-31 ^
-  --interval 1h ^
-  --output data\midcap_2y_hourly.csv ^
-  --sectors l1_l2,defi,oracle_infra,gaming,meme,legacy ^
-  --include-mega
+python -c "from crypto_checker.spread_check import check_order_book_spread; check_order_book_spread(['BTCUSDT','INJUSDT'], output='data/spread.csv')"
 ```
 
-Data hourly jauh lebih besar. Jalankan setelah dataset daily selesai dan valid.
+Mengukur spread bid-ask riil (bps) dan menyimpan CSV. Hasil terukur (snapshot): median ~2.3 bps, maks ~16 bps (DYDX saat volatil); tier bawah midcap (15+40 bps) konservatif ~11x di atas median spread tier bawah. Catatan: snapshot kondisi tenang — stress 2x/4x menutupi pelebaran saat krisis. Simbol hilang dari bookTicker (mis. delisted) dilaporkan eksplisit. Jika API tidak terjangkau, hasil `SPREAD_CHECK_UNAVAILABLE` dan analisis otomatis turun ke mode eksplorasi (tidak deployable).
 
-Jika funding tidak lengkap, downloader menyimpan:
-
-```text
-data/<nama>_partial.csv
-```
-
-File partial tidak boleh digunakan untuk backtest funding.
-
-## Analisis Dataset Midcap
-
-Setelah dataset valid tersedia:
+## Analisis Midcap End-to-End
 
 ```bash
 python scripts\analyze_midcap.py ^
@@ -269,138 +202,35 @@ python scripts\analyze_midcap.py ^
   --interval 1d
 ```
 
-Script akan:
+Tanpa `--require-funding` (dataset partial tanpa funding), script berjalan mode `price_only` eksplorasi dengan forced exit — valid untuk riset IC, **tidak valid** untuk keputusan futures. Script menguji `low_vol_14/30`, `reversal_1`, `resid_reversal_14/30` dengan cost midcap + walk-forward, lalu menulis `analysis_summary.json` berisi mode, manifest universe, forced-exit assets, preflight, status spread, dan keputusan deploy.
 
-1. Menyatukan nama token lama dan baru.
-2. Membuang asset dengan coverage tanggal tidak penuh.
-3. Menjalankan preflight validation.
-4. Mencoba mengambil spread order book.
-5. Menguji signal `low_vol_14`.
-6. Menguji signal `low_vol_30`.
-7. Menguji signal `reversal_1`.
-8. Menguji signal `resid_reversal_14`.
-9. Menguji signal `resid_reversal_30`.
-10. Menjalankan walk-forward.
-11. Menyimpan report tiap signal.
-
-Output utama:
-
-```text
-reports/midcap_2y_daily/preflight.json
-reports/midcap_2y_daily/<signal>/summary.json
-reports/midcap_2y_daily/walk_forward/walk_forward.json
-reports/midcap_2y_daily/analysis_summary.json
-```
-
-## Menjalankan Crypto Checker
-
-Contoh dengan signal `momentum_30`:
-
-```bash
-python -m crypto_checker.cli ^
-  --input data\midcap_2y_daily.csv ^
-  --output reports\midcap_momentum_30 ^
-  --signal momentum_30 ^
-  --n-long 3 ^
-  --n-short 3 ^
-  --liquidity-column quote_volume ^
-  --cost-preset midcap
-```
-
-Contoh dengan signal `low_vol_30`:
+## Menjalankan Checker Manual
 
 ```bash
 python -m crypto_checker.cli ^
   --input data\midcap_2y_daily.csv ^
   --output reports\midcap_low_vol_30 ^
-  --signal low_vol_30 ^
-  --n-long 3 ^
-  --n-short 3 ^
-  --liquidity-column quote_volume ^
-  --cost-preset midcap
+  --signal low_vol_30 --n-long 3 --n-short 3 ^
+  --liquidity-column quote_volume --cost-preset midcap
 ```
 
-Mode riset lengkap:
-
-```bash
-python -m crypto_checker.cli ^
-  --input data\midcap_2y_daily.csv ^
-  --output reports\midcap_research ^
-  --research
-```
-
-Untuk mode production yang langsung berhenti saat risk limit terlampaui:
-
-```bash
-python -m crypto_checker.cli ^
-  --input data\midcap_2y_daily.csv ^
-  --output reports\midcap_production_check ^
-  --signal low_vol_30 ^
-  --enforce-risk-limits
-```
+Opsi penting: `--signal` (kolom signal), `--signal-lookback`, `--min-signal-gap`, `--enforce-risk-limits`, `--liquidity-column`, `--cost-preset {liquid,midcap}`, `--research` (pipeline riset penuh + deployment decision), `--skip-walk-forward`.
 
 ## Membaca Hasil
 
-Lihat file:
-
-```text
-reports/<nama_report>/summary.json
-```
-
-Metrik penting:
-
-- `total_return`: hasil akhir strategi.
-- `sharpe`: return dibanding risiko.
-- `max_drawdown`: penurunan terbesar dari equity tertinggi.
-- `average_turnover`: seberapa sering portfolio berubah.
-- `total_fees`: total fee transaksi.
-- `total_slippage`: estimasi kerugian karena slippage.
-- `funding_pnl`: hasil atau biaya funding futures.
-- `violations`: pelanggaran risk limit.
-
-File:
-
-```text
-reports/<nama_report>/validation.json
-```
-
-menunjukkan hasil train, validation, out-of-sample, regime, dan cost stress.
+- `summary.json`: return, Sharpe, volatilitas, max drawdown, turnover, fee, slippage, funding PnL, capacity violations.
+- `validation.json`: performa train/val/OOS (continuous), violations, cost stress, benchmark, regime, gates, `deployable`.
+- `walk_forward/walk_forward.json`: pilihan per fold, return agregat, stress, gates.
+- `analysis_summary.json` (analyze_midcap): mode, manifest, forced exits, status spread.
 
 ## Arti DEPLOYABLE
 
-`DEPLOYABLE=True` bukan berarti profit pasti di masa depan. Artinya sistem melewati semua pemeriksaan yang ditetapkan.
-
-Gerbang deployment memerlukan:
-
-- Train positif.
-- Validation positif.
-- Out-of-sample positif.
-- Sharpe out-of-sample memadai.
-- Drawdown tidak melewati batas.
-- Cost stress tetap positif.
-- Tidak ada risk violation.
-- Funding coverage lengkap.
-- Data tidak memiliki gap kritis.
-- Migration token sudah benar.
-- Spread order book tersedia dan masuk akal.
-
-Jika salah satu syarat gagal, sistem harus tetap menghasilkan:
-
-```text
-DEPLOYABLE False
-```
-
-Jangan mengubah gate hanya agar hasil menjadi `True`. Cari signal, data, atau model execution yang lebih baik.
+`DEPLOYABLE=True` berarti lolos semua gate, **bukan** jaminan profit: train/val/OOS positif, Sharpe OOS > 1, drawdown > -20%, semua cost stress positif, nol risk/capacity violation, funding 100%, spread lolos, IC lolos multiple-testing. Satu saja gagal -> `DEPLOYABLE False`.
 
 ## Batasan
 
-- Backtest bukan jaminan profit live.
-- Spread order book dapat berubah cepat.
-- Slippage midcap dapat lebih besar daripada estimasi.
-- Token delisting dapat membuat coverage tidak lengkap.
-- Migration token membutuhkan faktor harga resmi.
-- Funding rate dapat berubah ekstrem.
-- Hasil OOS juga dapat terkena regime shift.
-- Paper trading tetap wajib sebelum modal nyata.
-
-Deployment live sebaiknya dimulai dari paper trading selama 60-90 hari dengan ukuran posisi kecil, monitoring aktif, kill switch, dan rekonsiliasi order.
+- Backtest bukan jaminan profit live; hasil OOS bisa kena regime shift.
+- Universe berpotensi bias survivorship (tercatat di setiap report).
+- Snapshot spread bukan kondisi stress; slippage real-time bisa lebih besar.
+- Migration tanpa faktor resmi ditolak — jangan menebak rasio.
+- Paper trading 60-90 hari + kill switch + rekonsiliasi order tetap wajib sebelum modal nyata.

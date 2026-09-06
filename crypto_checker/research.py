@@ -3,6 +3,7 @@ import json
 import numpy as np
 import pandas as pd
 from .signals import available_candidates, build_signals
+from .reality_check import reality_check, block_bootstrap_mean, newey_west_tstat, multiple_testing_adjusted_pvalue
 
 
 def _spearman(a, b):
@@ -26,7 +27,7 @@ def rank_ic_analysis(frame, candidates, output_dir=None):
             continue
         mean, std = float(daily.mean()), float(daily.std(ddof=1))
         tstat = mean / std * (len(daily) ** 0.5) if std else np.nan
-        rows.append({"signal": cand, "ic_mean": mean, "ic_std": std, "ic_tstat": float(tstat), "icir": float(mean / std) if std else np.nan, "ic_days": int(len(daily))})
+        rows.append({"signal": cand, "ic_mean": mean, "ic_std": std, "ic_tstat": float(tstat), "nw_tstat": newey_west_tstat(daily), "bootstrap_lower_95": block_bootstrap_mean(daily)["lower_95"], "bootstrap_upper_95": block_bootstrap_mean(daily)["upper_95"], "adjusted_pvalue": multiple_testing_adjusted_pvalue(tstat, len(candidates)), "icir": float(mean / std) if std else np.nan, "ic_days": int(len(daily))})
     result = pd.DataFrame(rows).sort_values("ic_tstat", ascending=False, key=lambda s: s.abs() if s.dtype != object else s).reset_index(drop=True)
     if output_dir:
         path = Path(output_dir)
@@ -61,7 +62,8 @@ def run_research(data, output_dir="reports/research", min_ic_tstat=2.0):
     ic = rank_ic_analysis(built, candidates, output_dir=output_dir)
     quants = quantile_returns(built, candidates, output_dir=output_dir)
     ic_gate = {row["signal"]: bool(abs(row["ic_tstat"]) >= min_ic_tstat) if not np.isnan(row["ic_tstat"]) else False for _, row in ic.iterrows()}
-    summary = {"candidates": candidates, "ic_table": ic.to_dict("records"), "ic_gate": ic_gate, "ic_pass_count": int(sum(ic_gate.values()))}
+    records = ic.to_dict("records")
+    summary = {"candidates": candidates, "ic_table": records, "ic_gate": ic_gate, "ic_pass_count": int(sum(ic_gate.values())), "reality_check": reality_check(records), "bootstrap_note": "Use block_bootstrap_mean on daily IC series for candidate-specific confidence intervals"}
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     Path(output_dir, "research_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     return summary, built

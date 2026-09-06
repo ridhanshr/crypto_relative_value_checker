@@ -3,7 +3,7 @@ from pathlib import Path
 import json
 import numpy as np
 import pandas as pd
-from .assets import canonicalize_assets
+from .assets import canonicalize_assets, audit_migration_collisions
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,10 @@ class CheckerConfig:
     liquidity_lookback: int = 30
     liquidity_tiers: tuple = ()
     require_funding: bool = False
+    reject_migration_collisions: bool = True
+    delist_mode: str = "error"
+    max_volume_participation: float = 0.05
+    cost_multiplier: float = 1.0
 
 
 def _validate(data, signal_column):
@@ -66,6 +70,8 @@ def _assign_liquidity_tier_rates(data, cfg):
 
 def check_strategy(data, config=None):
     cfg = config or CheckerConfig()
+    if cfg.reject_migration_collisions and not audit_migration_collisions(data).empty:
+        raise ValueError("Migration source collision detected; resolve effective-date overlap before backtest")
     data = canonicalize_assets(data)
     if cfg.require_funding and "funding_rate" not in data.columns:
         raise ValueError("Funding rate column required for this strategy")
@@ -73,7 +79,7 @@ def check_strategy(data, config=None):
     if cfg.signal_lookback > 1:
         data[cfg.signal_column] = data.groupby("asset")[cfg.signal_column].transform(lambda x: x.rolling(cfg.signal_lookback, min_periods=cfg.signal_lookback).mean())
         data = data.dropna(subset=[cfg.signal_column]).reset_index(drop=True)
-    if cfg.n_long < 1 or cfg.n_short < 1 or cfg.initial_equity <= 0 or cfg.gross_exposure <= 0 or cfg.fee_rate < 0 or cfg.slippage_rate < 0 or cfg.signal_lookback < 1 or cfg.min_signal_gap < 0 or cfg.rebalance_every < 1 or not 0 < cfg.max_drawdown_limit < 1 or not 0 < cfg.daily_loss_limit < 1 or cfg.vol_target_annual < 0 or cfg.vol_lookback < 2 or not 0 < cfg.vol_warmup_scale <= 1 or cfg.liquidity_lookback < 1:
+    if cfg.n_long < 1 or cfg.n_short < 1 or cfg.initial_equity <= 0 or cfg.gross_exposure <= 0 or cfg.fee_rate < 0 or cfg.slippage_rate < 0 or cfg.signal_lookback < 1 or cfg.min_signal_gap < 0 or cfg.rebalance_every < 1 or not 0 < cfg.max_drawdown_limit < 1 or not 0 < cfg.daily_loss_limit < 1 or cfg.vol_target_annual < 0 or cfg.vol_lookback < 2 or not 0 < cfg.vol_warmup_scale <= 1 or cfg.liquidity_lookback < 1 or not 0 < cfg.max_volume_participation <= 1 or cfg.cost_multiplier < 0 or cfg.delist_mode not in ("error", "forced_exit"):
         raise ValueError("Invalid checker configuration")
     if cfg.liquidity_tiers:
         thresholds = [t[0] for t in cfg.liquidity_tiers]
@@ -102,14 +108,29 @@ def check_strategy(data, config=None):
                 vol_scale = cfg.vol_warmup_scale
         cross = data[data.timestamp == ts].copy()
         cross = cross.dropna(subset=[cfg.signal_column]).sort_values([cfg.signal_column, "asset"], ascending=[False, True])
+        if tiered_costs:
+            volumes_all = pd.to_numeric(cross[cfg.liquidity_column], errors="coerce")
+            invalid_mask = ~np.isfinite(volumes_all) | (volumes_all <= 0)
+            for asset in sorted(cross.loc[invalid_mask, "asset"].tolist()):
+                violation_rows.append({"timestamp": ts, "type": "invalid_liquidity", "asset": asset, "last_price": float(cross.loc[cross.asset == asset, "price"].iloc[0]), "value": 0.0, "limit": 0.0})
+            if invalid_mask.any():
+                cross = cross[~invalid_mask]
+        if prev_positions:
+            missing_held = sorted(set(prev_positions) - set(cross.asset))
+            if missing_held and cfg.delist_mode == "error":
+                raise ValueError(f"Missing price for held positions at {ts}: {missing_held}")
+            if missing_held and cfg.delist_mode == "forced_exit":
+                for asset in missing_held:
+                    violation_rows.append({"timestamp": ts, "type": "forced_exit", "asset": asset, "last_price": prev_prices.get(asset), "value": 0.0, "limit": 0.0})
         if len(cross) < cfg.n_long + cfg.n_short:
             raise ValueError(f"Not enough assets at {ts}")
         longs = cross.head(cfg.n_long)
         shorts = cross.tail(cfg.n_short)
-        if period % cfg.rebalance_every and prev_positions:
-            positions = prev_positions.copy()
-        elif len(longs) and len(shorts) and float(longs[cfg.signal_column].iloc[-1] - shorts[cfg.signal_column].iloc[0]) < cfg.min_signal_gap and prev_positions:
-            positions = prev_positions.copy()
+        carry = {a: w for a, w in prev_positions.items() if a in set(cross.asset)} if prev_positions else {}
+        if period % cfg.rebalance_every and carry:
+            positions = carry.copy()
+        elif len(longs) and len(shorts) and float(longs[cfg.signal_column].iloc[-1] - shorts[cfg.signal_column].iloc[0]) < cfg.min_signal_gap and carry:
+            positions = carry.copy()
         else:
             w = cfg.gross_exposure / 2 * vol_scale
             positions = {a: w / cfg.n_long for a in set(longs.asset)}
@@ -124,6 +145,14 @@ def check_strategy(data, config=None):
         for asset, weight in positions.items():
             position_rows.append({"signal_timestamp": ts, "execution_timestamp": next_ts, "timestamp": ts, "asset": asset, "weight": weight, "price": current_prices[asset]})
         turnover_notional = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) for a in set(positions) | set(prev_positions)) * equity
+        if cfg.liquidity_tiers and cfg.liquidity_column and cfg.liquidity_column in cross:
+            volumes = dict(zip(cross.asset, cross[cfg.liquidity_column]))
+            for asset in set(positions) | set(prev_positions):
+                change_notional = abs(positions.get(asset, 0) - prev_positions.get(asset, 0)) * equity
+                if asset in volumes and (not np.isfinite(volumes[asset]) or volumes[asset] <= 0):
+                    raise ValueError(f"Invalid liquidity value for {asset} at {ts}")
+                if asset in volumes and change_notional > float(volumes[asset]) * cfg.max_volume_participation:
+                    violation_rows.append({"timestamp": ts, "type": "capacity_limit", "asset": asset, "notional": change_notional, "max_notional": float(volumes[asset]) * cfg.max_volume_participation})
         if prev_positions:
             price_pnl = sum(prev_positions.get(a, 0) * equity * (current_prices[a] / prev_prices[a] - 1) for a in prev_positions if a in current_prices and a in prev_prices)
             funding_rates = dict(zip(cross.asset, cross["funding_rate"] if "funding_rate" in cross else [0.0] * len(cross)))
@@ -134,11 +163,11 @@ def check_strategy(data, config=None):
         if tiered_costs:
             fee_rates = dict(zip(cross.asset, cross["_fee_rate"]))
             slip_rates = dict(zip(cross.asset, cross["_slip_rate"]))
-            fee = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) * equity * fee_rates.get(a, cfg.fee_rate) for a in set(positions) | set(prev_positions))
-            slippage = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) * equity * slip_rates.get(a, cfg.slippage_rate) for a in set(positions) | set(prev_positions))
+            fee = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) * equity * fee_rates.get(a, cfg.fee_rate) for a in set(positions) | set(prev_positions)) * cfg.cost_multiplier
+            slippage = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) * equity * slip_rates.get(a, cfg.slippage_rate) for a in set(positions) | set(prev_positions)) * cfg.cost_multiplier
         else:
-            fee = turnover_notional * cfg.fee_rate
-            slippage = turnover_notional * cfg.slippage_rate
+            fee = turnover_notional * cfg.fee_rate * cfg.cost_multiplier
+            slippage = turnover_notional * cfg.slippage_rate * cfg.cost_multiplier
         total = price_pnl + funding - fee - slippage
         equity += total
         daily_return = total / (equity - total)
@@ -167,7 +196,10 @@ def check_strategy(data, config=None):
     equity_full = pd.concat([pd.Series([cfg.initial_equity]), equity_curve], ignore_index=True)
     drawdown = (equity_full / equity_full.cummax() - 1).iloc[1:]
     summary = {"initial_equity": cfg.initial_equity, "final_equity": float(equity_curve.iloc[-1]), "total_return": float(equity_curve.iloc[-1] / cfg.initial_equity - 1), "periods": len(active_pnl), "annualized_return": float((equity_curve.iloc[-1] / cfg.initial_equity) ** (365 / max(len(active_pnl), 1)) - 1), "annualized_volatility": float(returns.std(ddof=1) * (365 ** 0.5)) if len(returns) > 1 else 0.0, "sharpe": float(returns.mean() / returns.std(ddof=1) * (365 ** 0.5)) if len(returns) > 1 and returns.std(ddof=1) else 0.0, "max_drawdown": float(drawdown.min()), "winning_periods": int((returns > 0).sum()), "losing_periods": int((returns < 0).sum()), "total_fees": float(pnl.fee_cost.sum()), "total_slippage": float(pnl.slippage_cost.sum()), "average_turnover": float(active_pnl.turnover.mean()) if len(active_pnl) else 0.0}
-    return {"ranking": ranking, "exposure": exposure, "positions": position_frame, "turnover": turnover[["timestamp", "turnover"]], "trades": pd.DataFrame(trade_rows), "pnl": pnl, "violations": pd.DataFrame(violation_rows), "metrics": summary}
+    violations = pd.DataFrame(violation_rows)
+    capacity = violations[violations["type"] == "capacity_limit"].copy() if not violations.empty and "type" in violations else pd.DataFrame()
+    summary["capacity_violations"] = int(len(capacity))
+    return {"ranking": ranking, "exposure": exposure, "positions": position_frame, "turnover": turnover[["timestamp", "turnover"]], "trades": pd.DataFrame(trade_rows), "pnl": pnl, "violations": violations, "capacity": capacity, "metrics": summary}
 
 
 def write_reports(result, output_dir):

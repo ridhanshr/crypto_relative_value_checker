@@ -4,13 +4,34 @@ import json
 import numpy as np
 import pandas as pd
 from .core import CheckerConfig, check_strategy
+from .reality_check import reality_check
 
 
 COST_STRESS_TIERS = ((0.0004, 0.0005), (0.0008, 0.001), (0.0012, 0.002), (0.0008, 0.002), (0.0015, 0.004))
 
+SURVIVORSHIP_NOTE = "Universe berasal dari simbol yang tersedia saat ini; tanpa verifikasi point-in-time membership independen, hasil IC/return berpotensi bias survivorship yang belum terukur."
+
 
 def _metrics(result):
     return result["metrics"]
+
+
+def _segment_metrics(full_pnl, full_violations, dates, initial_equity):
+    seg = full_pnl[full_pnl.timestamp.isin(dates)]
+    if seg.empty:
+        raise ValueError("Empty validation segment")
+    first_idx = int(seg.index[0])
+    equity_start = float(full_pnl.iloc[first_idx - 1].equity) if first_idx > 0 else float(initial_equity)
+    equity_end = float(seg.equity.iloc[-1])
+    returns = seg["return"].astype(float)
+    std = returns.std(ddof=1)
+    curve = pd.concat([pd.Series([equity_start]), seg.equity.reset_index(drop=True)], ignore_index=True)
+    drawdown = (curve / curve.cummax() - 1).iloc[1:]
+    if not full_violations.empty and "timestamp" in full_violations:
+        seg_violations = full_violations[full_violations.timestamp.isin(dates)]
+    else:
+        seg_violations = pd.DataFrame()
+    return {"initial_equity": equity_start, "final_equity": equity_end, "total_return": equity_end / equity_start - 1, "periods": int(len(seg)), "annualized_return": float((equity_end / equity_start) ** (365 / max(len(seg), 1)) - 1), "annualized_volatility": float(std * 365 ** 0.5) if len(returns) > 1 and std else 0.0, "sharpe": float(returns.mean() / std * 365 ** 0.5) if len(returns) > 1 and std else 0.0, "max_drawdown": float(drawdown.min()), "winning_periods": int((returns > 0).sum()), "losing_periods": int((returns < 0).sum()), "average_turnover": float(seg.turnover.mean()), "risk_violations": int(len(seg_violations)), "capacity_violations": int((seg_violations["type"] == "capacity_limit").sum()) if not seg_violations.empty and "type" in seg_violations else 0, "forced_exits": int((seg_violations["type"] == "forced_exit").sum()) if not seg_violations.empty and "type" in seg_violations else 0}
 
 
 def benchmark_equal_weight(data):
@@ -21,6 +42,26 @@ def benchmark_equal_weight(data):
     daily = returns.groupby(frame.loc[returns.index, "timestamp"]).mean().dropna()
     equity = (1 + daily).cumprod()
     return {"total_return": float(equity.iloc[-1] - 1) if len(equity) else 0.0, "periods": int(len(equity))}
+
+
+def benchmark_suite(data):
+    frame = data.copy()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+    frame = frame.sort_values(["asset", "timestamp"])
+    returns = frame.groupby("asset")["price"].pct_change()
+    daily = returns.groupby(frame.loc[returns.index, "timestamp"]).mean().dropna()
+
+    def compound(series):
+        series = series.dropna()
+        return float((1 + series).prod() - 1) if len(series) else 0.0
+
+    result = {"equal_weight": benchmark_equal_weight(frame)}
+    for asset in ("BTCUSDT", "ETHUSDT"):
+        series = frame[frame.asset == asset].set_index("timestamp")["price"].pct_change()
+        result[asset.lower()] = {"total_return": compound(series), "periods": int(series.dropna().size)}
+    result["long_only_equal_weight"] = {"total_return": compound(daily.clip(lower=0)), "periods": int(daily.size)}
+    result["market_neutral_random_reference"] = {"total_return": 0.0, "periods": int(daily.size), "note": "zero-return theoretical neutral reference"}
+    return result
 
 
 def regime_labels(data):
@@ -57,19 +98,28 @@ def run_validation(data, config=None, train_ratio=0.6, validation_ratio=0.2, out
     second = int(len(dates) * (train_ratio + validation_ratio))
     if first < 1 or second <= first or second >= len(dates):
         raise ValueError("Each validation split must contain at least one timestamp")
-    pieces = {"train": frame[frame.timestamp.isin(dates[:first])], "validation": frame[frame.timestamp.isin(dates[first:second])], "out_of_sample": frame[frame.timestamp.isin(dates[second:])]}
+    slice_dates = {"train": dates[:first], "validation": dates[first:second], "out_of_sample": dates[second:]}
     if cfg.signal_column in frame.columns:
-        pieces = {name: part.dropna(subset=[cfg.signal_column]) for name, part in pieces.items()}
         frame = frame.dropna(subset=[cfg.signal_column])
-    if any(part.empty for part in pieces.values()):
+        slice_dates = {name: [d for d in ds if d in set(frame.timestamp)] for name, ds in slice_dates.items()}
+    if any(not ds for ds in slice_dates.values()):
         raise ValueError("Validation split became empty after signal warm-up filtering")
-    results = {name: _metrics(check_strategy(part, research_cfg)) for name, part in pieces.items()}
-    stress = {}
-    for fee, slippage in COST_STRESS_TIERS:
-        stress[f"fee_{fee}_slippage_{slippage}"] = _metrics(check_strategy(pieces["out_of_sample"], replace(research_cfg, fee_rate=fee, slippage_rate=slippage)))
-    violations = {name: int(len(check_strategy(part, research_cfg)["violations"])) for name, part in pieces.items()}
     full_run = check_strategy(frame, research_cfg)
-    result = {"splits": {name: {"start": str(part.timestamp.min()), "end": str(part.timestamp.max()), "periods": int(part.timestamp.nunique())} for name, part in pieces.items()}, "performance": results, "risk_violations": violations, "cost_stress": stress, "benchmark_equal_weight": benchmark_equal_weight(pieces["out_of_sample"]), "regimes": regime_performance(frame, full_run["pnl"]), "gates": {"train_positive": results["train"]["total_return"] > 0, "validation_positive": results["validation"]["total_return"] > 0, "oos_positive": results["out_of_sample"]["total_return"] > 0, "oos_sharpe_above_one": results["out_of_sample"]["sharpe"] > 1, "oos_drawdown_above_minus_20pct": results["out_of_sample"]["max_drawdown"] > -0.20, "stress_positive": all(x["total_return"] > 0 for x in stress.values()), "no_risk_violations": all(value == 0 for value in violations.values())}}
+    results = {name: _segment_metrics(full_run["pnl"], full_run["violations"], ds, cfg.initial_equity) for name, ds in slice_dates.items()}
+    violations = {name: metrics["risk_violations"] for name, metrics in results.items()}
+    stress = {}
+    oos_frame = frame[frame.timestamp.isin(slice_dates["out_of_sample"])]
+    tiered = bool(research_cfg.liquidity_tiers and research_cfg.liquidity_column)
+    stress_tiers = []
+    for fee, slippage in COST_STRESS_TIERS:
+        if tiered:
+            multiplier = max(fee / 0.0004, slippage / 0.0005)
+            stress_tiers.append((f"cost_x_{multiplier:.2f}", {"cost_multiplier": multiplier}))
+        else:
+            stress_tiers.append((f"fee_{fee}_slippage_{slippage}", {"fee_rate": fee, "slippage_rate": slippage}))
+    for name, overrides in stress_tiers:
+        stress[name] = _metrics(check_strategy(oos_frame, replace(research_cfg, **overrides)))
+    result = {"splits": {name: {"start": str(min(ds)), "end": str(max(ds)), "periods": len(ds)} for name, ds in slice_dates.items()}, "performance": results, "risk_violations": violations, "cost_stress": stress, "benchmarks": benchmark_suite(oos_frame), "regimes": regime_performance(frame, full_run["pnl"]), "reality_check": reality_check([]), "continuous_equity": True, "survivorship_note": SURVIVORSHIP_NOTE, "gates": {"train_positive": results["train"]["total_return"] > 0, "validation_positive": results["validation"]["total_return"] > 0, "oos_positive": results["out_of_sample"]["total_return"] > 0, "oos_sharpe_above_one": results["out_of_sample"]["sharpe"] > 1, "oos_drawdown_above_minus_20pct": results["out_of_sample"]["max_drawdown"] > -0.20, "stress_positive": all(x["total_return"] > 0 for x in stress.values()), "no_risk_violations": all(value == 0 for value in violations.values()), "no_capacity_violations": all(metrics["capacity_violations"] == 0 for metrics in results.values())}}
     result["deployable"] = all(result["gates"].values())
     if output_dir:
         Path(output_dir).mkdir(parents=True, exist_ok=True)

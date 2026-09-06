@@ -2,10 +2,10 @@ from pathlib import Path
 import json
 import numpy as np
 import pandas as pd
-from .assets import canonicalize_assets, audit_migration_discontinuities
+from .assets import canonicalize_assets, audit_migration_discontinuities, audit_migration_collisions
 
 
-def validate_dataset(data, require_funding=False, require_liquidity=False, min_assets=2, min_periods=2, expected_frequency=None):
+def validate_dataset(data, require_funding=False, require_liquidity=False, min_assets=2, min_periods=2, expected_frequency=None, allow_gaps=False):
     errors = []
     warnings = []
     required = {"timestamp", "asset", "price", "signal"}
@@ -35,6 +35,10 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
     except Exception as exc:
         errors.append(f"Asset normalization failed: {exc}")
         return {"valid": False, "errors": errors, "warnings": warnings}
+    collisions = audit_migration_collisions(data)
+    if not collisions.empty:
+        errors.append(f"Migration source collision detected: {len(collisions)} timestamp/asset rows")
+        warnings.extend(collisions.astype(str).to_dict("records"))
     migration_gaps = audit_migration_discontinuities(frame)
     if not migration_gaps.empty:
         errors.append(f"Migration price discontinuities require official factors: {len(migration_gaps)}")
@@ -66,6 +70,16 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
     counts = frame.groupby("asset")["timestamp"].nunique()
     if len(counts) and counts.min() != counts.max():
         warnings.append(f"Unequal asset coverage: min={int(counts.min())}, max={int(counts.max())}")
+    statuses = frame.groupby("asset").agg(first_seen=("timestamp", "min"), last_seen=("timestamp", "max"), periods=("timestamp", "nunique")).reset_index()
+    end = frame["timestamp"].max()
+    try:
+        buffer = pd.Timedelta(7 * pd.tseries.frequencies.to_offset(expected_frequency).nanos, unit="ns") if expected_frequency else pd.Timedelta(days=7)
+    except Exception:
+        buffer = pd.Timedelta(days=7)
+    suspects = statuses[pd.to_datetime(statuses.last_seen, utc=True) < end - buffer].copy()
+    if not suspects.empty:
+        warnings.append(f"Delisting/rebrand suspects: {sorted(suspects.asset.tolist())}; their last trading day must be treated as forced exit, not silently dropped")
+    statuses["status"] = np.where(statuses.periods == periods, "active_full_period", "partial_history_or_delisted")
     if expected_frequency:
         gaps = []
         for asset, group in frame.groupby("asset"):
@@ -73,11 +87,17 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
             expected = pd.date_range(dates.iloc[0], dates.iloc[-1], freq=expected_frequency, tz="UTC")
             gaps.append(int(len(expected.difference(dates))))
         if sum(gaps):
-            errors.append(f"Timestamp gaps detected: {sum(gaps)} missing asset-periods")
-    return {"valid": not errors, "errors": errors, "warnings": warnings, "rows": int(len(frame)), "assets": assets, "periods": periods, "start": str(frame["timestamp"].min()), "end": str(frame["timestamp"].max()), "funding_present": "funding_rate" in frame.columns, "liquidity_present": "quote_volume" in frame.columns}
+            gap_detail = "; ".join(f"{asset}:{count}" for asset, count in zip(frame.groupby('asset').groups.keys(), gaps) if count)
+            message = f"Timestamp gaps detected: {sum(gaps)} missing asset-periods ({gap_detail[:200]})"
+            (errors if not allow_gaps else warnings).append(message)
+            if allow_gaps:
+                warnings.append("Gap-tolerant exploratory mode: missing asset-periods trigger forced exits in backtest; NOT valid for futures deployment")
+    membership = frame.groupby(["timestamp", "asset"]).size().reset_index(name="rows")
+    membership["timestamp"] = membership["timestamp"].astype(str)
+    return {"valid": not errors, "errors": errors, "warnings": warnings, "rows": int(len(frame)), "assets": assets, "periods": periods, "start": str(frame["timestamp"].min()), "end": str(frame["timestamp"].max()), "funding_present": "funding_rate" in frame.columns, "liquidity_present": "quote_volume" in frame.columns, "universe_membership": membership.to_dict("records"), "asset_status": statuses.astype(str).to_dict("records"), "delisting_suspects": suspects.astype(str).to_dict("records"), "survivorship_note": "Universe berasal dari simbol yang tersedia saat ini; tanpa verifikasi point-in-time membership independen, hasil IC/return berpotensi bias survivorship yang belum terukur."}
 
 
 def write_preflight(result, output_dir):
     path = Path(output_dir)
     path.mkdir(parents=True, exist_ok=True)
-    (path / "preflight.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    (path / "preflight.json").write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
