@@ -109,6 +109,14 @@ def build_lifecycle(data, delist_buffer_days=7):
     return lifecycle.sort_values(["canonical", "listed_at"]).reset_index(drop=True)
 
 
+def active_assets(lifecycle, ts):
+    """Canonical assets tradable at instant ``ts`` (point-in-time universe)."""
+    moment = pd.Timestamp(ts, tz="UTC")
+    frame = _normalize_lifecycle(lifecycle)
+    live = frame[(frame["listed_at"] <= moment) & (frame["delisted_at"].isna() | (moment < frame["delisted_at"]))]
+    return sorted(live["canonical"].unique().tolist())
+
+
 def _normalize_lifecycle(lifecycle):
     """Coerce lifecycle timestamps to tz-aware UTC (fail-closed on garbage).
 
@@ -122,14 +130,6 @@ def _normalize_lifecycle(lifecycle):
     if frame["listed_at"].isna().any():
         raise ValueError("Lifecycle manifest has unparseable listed_at values")
     return frame
-
-
-def active_assets(lifecycle, ts):
-    """Canonical assets tradable at instant ``ts`` (point-in-time universe)."""
-    moment = pd.Timestamp(ts, tz="UTC")
-    frame = _normalize_lifecycle(lifecycle)
-    live = frame[(frame["listed_at"] <= moment) & (frame["delisted_at"].isna() | (moment < frame["delisted_at"]))]
-    return sorted(live["canonical"].unique().tolist())
 
 
 def write_lifecycle_manifest(lifecycle, path):
@@ -178,4 +178,68 @@ def audit_universe_compliance(data, lifecycle):
             else:
                 reason = "trading_after_delisting"
             rows.append({"timestamp": ts, "asset": row["asset"] if "asset" in frame.columns else canonical, "reason": reason})
+    return pd.DataFrame(rows, columns=cols)
+
+
+def classify_timestamp_gaps(data, expected_frequency="D", adjacency_days=7):
+    """Classify contiguous blocks of missing asset-periods.
+
+    Returns DataFrame [asset, gap_start, gap_end, gap_days, reason] with
+    reason in:
+      - "migration_halt": the missing block contains or adjoins (within
+        ``adjacency_days``) the official effective date of that canonical
+        token's migration -- a documented exchange halt, safe for research
+        and futures alike (positions are force-exited, never carried).
+      - "unexplained_interior": a hole with no migration event nearby --
+        genuine missing data. The ONLY gap class that must fail a futures
+        run.
+
+    Listing/delisting edges never appear here by construction (the expected
+    range runs first-seen -> last-seen per asset); they are covered by
+    lifecycle segments, not by this classifier.
+    """
+    cols = ["asset", "gap_start", "gap_end", "gap_days", "reason"]
+    frame = data.copy()
+    if "asset" not in frame.columns or "timestamp" not in frame.columns:
+        raise ValueError("Gap classification needs 'asset' and 'timestamp' columns")
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="raise")
+    frame["canonical"] = frame["asset"].astype(str).str.upper().map(canonical_asset)
+    effective = {}
+    for old, meta in MIGRATION_METADATA.items():
+        eff = meta.get("effective_date")
+        if eff is not None:
+            effective[meta["canonical"]] = pd.Timestamp(eff, tz="UTC")
+    adjacency = pd.Timedelta(days=adjacency_days)
+    rows = []
+    try:
+        offset = pd.tseries.frequencies.to_offset(expected_frequency)
+        step = pd.Timedelta(offset.nanos, unit="ns")
+    except Exception:
+        step = pd.Timedelta(days=1)
+    for canonical, group in frame.groupby("canonical"):
+        dates = group["timestamp"].drop_duplicates().sort_values()
+        if len(dates) < 2:
+            continue
+        expected = pd.date_range(dates.iloc[0], dates.iloc[-1], freq=expected_frequency, tz="UTC")
+        missing = expected.difference(dates)
+        if missing.empty:
+            continue
+        # Group consecutive missing periods into blocks.
+        blocks = []
+        start = prev = missing[0]
+        for ts in missing[1:]:
+            if ts - prev <= step * 1.5:
+                prev = ts
+                continue
+            blocks.append((start, prev))
+            start = prev = ts
+        blocks.append((start, prev))
+        eff = effective.get(_base_token(canonical))
+        for start, end in blocks:
+            days = int(round((end - start) / step)) + 1
+            if eff is not None and (start - adjacency) <= eff <= (end + adjacency):
+                reason = "migration_halt"
+            else:
+                reason = "unexplained_interior"
+            rows.append({"asset": canonical, "gap_start": start, "gap_end": end, "gap_days": days, "reason": reason})
     return pd.DataFrame(rows, columns=cols)

@@ -19,10 +19,10 @@ parser.add_argument("--input", required=True)
 parser.add_argument("--output", default="reports/midcap_analysis")
 parser.add_argument("--require-funding", action="store_true")
 parser.add_argument("--allow-gaps", action="store_true",
-                    help="Tolerate interior timestamp gaps (exchange halts/delistings); "
-                         "missing held positions are force-exited at last price and all "
-                         "gaps are logged in the manifest. Required when the panel "
-                         "contains documented halt windows.")
+                    help="Tolerate UNEXPLAINED interior timestamp gaps (exploratory mode only, "
+                         "NOT valid for futures deployment). Documented exchange halts "
+                         "(migration_halt) never need this flag; missing held positions "
+                         "are force-exited at last price and all gaps are logged.")
 parser.add_argument("--interval", default="1d", choices=["1d", "4h", "1h"])
 parser.add_argument("--slippage-mode", default="spread", choices=["tier", "spread"], help="spread=max(measured full spread, tier floor); falls back to tier when spread check fails")
 args = parser.parse_args()

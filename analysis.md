@@ -124,12 +124,7 @@ yang berubah hanya keyakinan bahwa penolakan gate bukan artefak asumsi murah.
 
 ## 3. Kelemahan / catatan yang tersisa (bukan blocker audit)
 
-1. **Ketegangan gap-tolerant + futures.** Run ini memakai `--allow-gaps`
-   bersama `--require-funding`, padahal teks warning preflight menyebut mode
-   toleran-gap tidak valid untuk deployment futures. Praktiknya aman untuk
-   *riset* (59 gap = halt/delisting nyata, ditangani forced exit, semuanya
-   tercatat), tetapi teks warning vs perilaku perlu diselaraskan: bedakan
-   "gap halt bursa yang terdokumentasi" vs "gap data yang tak terjelaskan".
+1. **Ketegangan gap-tolerant + futures — SELESAI.** Preflight kini mentriase gap tiga jenis (`classify_timestamp_gaps` di `lifecycle.py`): `migration_halt` (blok kosong berisi/berdampingan effective date resmi — fakta halt bursa, selalu warning, tidak pernah error), tepi listing/delisting (ditangani segmen lifecycle), dan `unexplained_interior` (satu-satunya yang bisa menggagalkan run futures; `--allow-gaps` kini hanya mentoleransi jenis ini, eksplorasi saja). Verifikasi di data nyata: 43 gap dataset funded (GUSDT:34, POLUSDT:9) semuanya halt migrasi kontinu (GAL halt 12 Jul 2024 → G jalan 15 Agu; MATIC halt 5 Sep → POL 13 Sep) — preflight ketat (`allow_gaps=False`) kini `valid: True` tanpa flag. Suite 67 test lulus.
 2. **Sampel forced-exit kecil.** Mekanisme terbukti bekerja (1 event
    tercatat + regression test), tetapi jarang terpicu pada konfigurasi ini —
    keyakinan statistik atas jalur itu terbatas.

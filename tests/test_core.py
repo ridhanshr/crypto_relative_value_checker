@@ -891,3 +891,41 @@ def test_walk_forward_reports_dsr_and_ensemble():
     assert ens["top_k"] == 2 and len(ens["members_per_fold"]) == result["n_folds"]
     assert all(len(m["members"]) >= 1 for m in ens["members_per_fold"])
     assert "diagnostic_only" in ens["note"]
+
+
+def test_timestamp_gap_triage_migration_halt_vs_unexplained():
+    from crypto_checker.lifecycle import classify_timestamp_gaps
+    # GAL halt block straddles the official 2024-07-19 effective date;
+    # the second block is an ordinary hole with no event nearby.
+    gal_dates = pd.date_range("2024-07-01", "2024-07-11", freq="D", tz="UTC").tolist()
+    gal_dates += pd.date_range("2024-08-15", "2024-08-20", freq="D", tz="UTC").tolist()
+    rows = [[str(d), "GALUSDT" if d < pd.Timestamp("2024-07-19", tz="UTC") else "GUSDT", 1.0] for d in gal_dates]
+    rows += [[str(d), "BTCUSDT", 60000.0] for d in pd.date_range("2024-07-01", "2024-08-20", freq="D", tz="UTC") if d not in (pd.Timestamp("2024-07-20", tz="UTC"),)]
+    data = pd.DataFrame(rows, columns=["timestamp", "asset", "price"])
+    table = classify_timestamp_gaps(data)
+    g_block = table[table["asset"] == "GUSDT"].iloc[0]
+    assert g_block["reason"] == "migration_halt" and g_block["gap_days"] == 34
+    btc_block = table[table["asset"] == "BTCUSDT"].iloc[0]
+    assert btc_block["reason"] == "unexplained_interior" and btc_block["gap_days"] == 1
+
+
+def test_preflight_strict_passes_documented_halt_fails_unexplained():
+    halt_only = pd.DataFrame(
+        # GAL 6.0 -> G 0.1 respects the official 1:60 factor (no discontinuity).
+        [[str(d), "GALUSDT" if d < pd.Timestamp("2024-07-19", tz="UTC") else "GUSDT", 6.0 if d < pd.Timestamp("2024-07-19", tz="UTC") else 0.1, 0.0]
+         for d in list(pd.date_range("2024-07-01", "2024-07-11", freq="D", tz="UTC")) + list(pd.date_range("2024-08-15", "2024-08-20", freq="D", tz="UTC"))]
+        + [[str(d), "BTCUSDT", 60000.0, 0.0] for d in pd.date_range("2024-07-01", "2024-08-20", freq="D", tz="UTC")],
+        columns=["timestamp", "asset", "price", "signal"],
+    )
+    strict = validate_dataset(halt_only, min_assets=2, min_periods=2, expected_frequency="D", allow_gaps=False)
+    assert strict["valid"], strict["errors"]
+    assert strict["gap_classification"]["unexplained_interior_days"] == 0
+    assert any("Documented exchange halt" in w for w in strict["warnings"])
+    hole = halt_only.copy()
+    hole = hole[~((hole["asset"] == "BTCUSDT") & (hole["timestamp"] == "2024-07-20 00:00:00+00:00") )]
+    strict_hole = validate_dataset(hole, min_assets=2, min_periods=2, expected_frequency="D", allow_gaps=False)
+    assert not strict_hole["valid"]
+    assert any("Unexplained interior gaps" in e for e in strict_hole["errors"])
+    tolerant = validate_dataset(hole, min_assets=2, min_periods=2, expected_frequency="D", allow_gaps=True)
+    assert tolerant["valid"]
+    assert any("NOT valid for futures" in w for w in tolerant["warnings"])

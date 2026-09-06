@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pandas as pd
 from .assets import canonicalize_assets, audit_migration_discontinuities, audit_migration_collisions, classify_funding_gaps
-from .lifecycle import build_lifecycle, INFERRED
+from .lifecycle import build_lifecycle, classify_timestamp_gaps, INFERRED
 
 
 def validate_dataset(data, require_funding=False, require_liquidity=False, min_assets=2, min_periods=2, expected_frequency=None, allow_gaps=False):
@@ -95,16 +95,37 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
     statuses["status"] = np.where(statuses.periods == periods, "active_full_period", "partial_history_or_delisted")
     if expected_frequency:
         gaps = []
+        gap_classification = {}
         for asset, group in frame.groupby("asset"):
             dates = group["timestamp"].drop_duplicates().sort_values()
             expected = pd.date_range(dates.iloc[0], dates.iloc[-1], freq=expected_frequency, tz="UTC")
             gaps.append(int(len(expected.difference(dates))))
-        if sum(gaps):
-            gap_detail = "; ".join(f"{asset}:{count}" for asset, count in zip(frame.groupby('asset').groups.keys(), gaps) if count)
-            message = f"Timestamp gaps detected: {sum(gaps)} missing asset-periods ({gap_detail[:200]})"
+        # Gap triage: documented exchange halts (migration_halt) are a
+        # market fact -- always warning, never error. Only genuinely
+        # unexplained interior holes can fail a run (or warn in tolerant
+        # mode). This resolves the old gap-tolerant-vs-futures tension:
+        # halts are not "tolerated gaps", they are documented non-trading.
+        gap_table = classify_timestamp_gaps(frame, expected_frequency=expected_frequency)
+        halted = gap_table[gap_table["reason"] == "migration_halt"] if not gap_table.empty else gap_table
+        unexplained = gap_table[gap_table["reason"] == "unexplained_interior"] if not gap_table.empty else gap_table
+        gap_classification = {
+            "migration_halt_days": int(halted["gap_days"].sum()) if not halted.empty else 0,
+            "unexplained_interior_days": int(unexplained["gap_days"].sum()) if not unexplained.empty else 0,
+            "migration_halt_assets": sorted(halted["asset"].unique().tolist()) if not halted.empty else [],
+            "unexplained_assets": sorted(unexplained["asset"].unique().tolist()) if not unexplained.empty else [],
+        }
+        if not halted.empty:
+            halt_detail = "; ".join(f"{r.asset}:{r.gap_start.date()}->{r.gap_end.date()}" for r in halted.itertuples())
+            warnings.append(f"Documented exchange halt(s): {int(halted['gap_days'].sum())} non-trading asset-periods ({halt_detail}); positions are force-exited across halts, never carried")
+        if not unexplained.empty:
+            gap_detail = "; ".join(f"{r.asset}:{r.gap_days}" for r in unexplained.itertuples())
+            message = f"Unexplained interior gaps: {int(unexplained['gap_days'].sum())} missing asset-periods ({gap_detail[:200]})"
             (errors if not allow_gaps else warnings).append(message)
             if allow_gaps:
-                warnings.append("Gap-tolerant exploratory mode: missing asset-periods trigger forced exits in backtest; NOT valid for futures deployment")
+                warnings.append("Gap-tolerant exploratory mode: unexplained gaps trigger forced exits in backtest; NOT valid for futures deployment")
+        elif sum(gaps) and halted.empty:
+            message = f"Timestamp gaps detected: {sum(gaps)} missing asset-periods"
+            (errors if not allow_gaps else warnings).append(message)
     if funding_gaps.empty:
         funding_gap_summary = {}
     else:
@@ -119,7 +140,7 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
     inferred_listings = sorted(lifecycle[lifecycle["source"].str.contains(INFERRED, na=False)]["canonical"].unique().tolist())
     if inferred_listings:
         warnings.append(f"Lifecycle listing dates inferred from data (NOT official) for: {inferred_listings}; replace with exchange listing dates before survivorship-free claims")
-    return {"valid": not errors, "errors": errors, "warnings": warnings, "rows": int(len(frame)), "assets": assets, "periods": periods, "start": str(frame["timestamp"].min()), "end": str(frame["timestamp"].max()), "funding_present": "funding_rate" in frame.columns, "liquidity_present": "quote_volume" in frame.columns, "funding_gap_summary": funding_gap_summary, "universe_membership": membership.to_dict("records"), "asset_status": statuses.astype(str).to_dict("records"), "delisting_suspects": suspects.astype(str).to_dict("records"), "lifecycle_manifest": lifecycle.astype(str).to_dict("records"), "lifecycle_segments": int(len(lifecycle)), "survivorship_note": "Universe berasal dari simbol yang tersedia saat ini; tanpa verifikasi point-in-time membership independen, hasil IC/return berpotensi bias survivorship yang belum terukur."}
+    return {"valid": not errors, "errors": errors, "warnings": warnings, "rows": int(len(frame)), "assets": assets, "periods": periods, "start": str(frame["timestamp"].min()), "end": str(frame["timestamp"].max()), "funding_present": "funding_rate" in frame.columns, "liquidity_present": "quote_volume" in frame.columns, "funding_gap_summary": funding_gap_summary, "gap_classification": gap_classification if expected_frequency else {}, "universe_membership": membership.to_dict("records"), "asset_status": statuses.astype(str).to_dict("records"), "delisting_suspects": suspects.astype(str).to_dict("records"), "lifecycle_manifest": lifecycle.astype(str).to_dict("records"), "lifecycle_segments": int(len(lifecycle)), "survivorship_note": "Universe berasal dari simbol yang tersedia saat ini; tanpa verifikasi point-in-time membership independen, hasil IC/return berpotensi bias survivorship yang belum terukur."}
 
 
 def write_preflight(result, output_dir):
