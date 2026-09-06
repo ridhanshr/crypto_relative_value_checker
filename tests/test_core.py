@@ -340,3 +340,39 @@ def test_preflight_flags_delisting_suspects():
     result = validate_dataset(data, min_assets=2, min_periods=2)
     assert any("Delisting" in warning for warning in result["warnings"])
     assert len(result["delisting_suspects"]) == 1
+
+
+def test_repair_drops_zero_volume_stale_rows():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from scripts.repair_midcap import repair_klines
+    data = pd.DataFrame([
+        ["2024-01-01", "A", 100, 10, 1000.0], ["2024-01-02", "A", 101, 11, 900.0],
+        ["2024-01-03", "A", 101, 0.0, 0.0], ["2024-01-04", "A", 101, 0.0, 0.0],
+        ["2024-01-01", "B", 50, 5, 500.0], ["2024-01-02", "B", 51, 6, 400.0],
+    ], columns=["timestamp", "asset", "price", "volume", "quote_volume"])
+    repaired, manifest = repair_klines(data)
+    assert len(repaired) == 4
+    assert manifest["actions"][0]["rows_dropped"] == 2
+    assert "asset_return" not in repaired.columns
+
+
+def test_repair_migration_cutover_uses_calendar_date():
+    # Regression: raw intraday-timestamp cutover misclassified NOM's first
+    # daily candle (2025-10-01 00:00, $0.03975) as legacy and divided it by
+    # 75, fabricating a +72x jump. Calendar-date cutover must leave it intact.
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from scripts.repair_midcap import repair_klines
+    data = pd.DataFrame([
+        ["2025-09-30", "NOMUSDT", 4.275, 100.0, 1000.0],
+        ["2025-10-01", "NOMUSDT", 0.03975, 200.0, 2000.0],
+        ["2025-10-02", "NOMUSDT", 0.03874, 150.0, 1500.0],
+    ], columns=["timestamp", "asset", "price", "volume", "quote_volume"])
+    repaired, _ = repair_klines(data)
+    row = repaired[repaired.timestamp == "2025-10-01"].iloc[0]
+    assert row.price == pytest.approx(0.03975)
+    legacy = repaired[repaired.timestamp == "2025-09-30"].iloc[0]
+    assert legacy.price == pytest.approx(4.275 / 75)
