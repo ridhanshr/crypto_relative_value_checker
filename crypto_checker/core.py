@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import numpy as np
 import pandas as pd
+from .assets import canonicalize_assets
 
 
 @dataclass(frozen=True)
@@ -13,69 +15,159 @@ class CheckerConfig:
     slippage_rate: float = 0.0005
     initial_equity: float = 100_000.0
     funding_positive_paid_by_long: bool = True
+    signal_lookback: int = 1
+    min_signal_gap: float = 0.0
+    rebalance_every: int = 1
+    max_drawdown_limit: float = 0.25
+    daily_loss_limit: float = 0.05
+    enforce_risk_limits: bool = False
+    signal_column: str = "signal"
+    vol_target_annual: float = 0.0
+    vol_lookback: int = 30
+    vol_warmup_scale: float = 0.5
+    liquidity_column: str = ""
+    liquidity_lookback: int = 30
+    liquidity_tiers: tuple = ()
+    require_funding: bool = False
 
 
-def _validate(data):
-    required = {"timestamp", "asset", "price", "signal"}
+def _validate(data, signal_column):
+    required = {"timestamp", "asset", "price", signal_column}
     missing = required - set(data.columns)
     if missing:
         raise ValueError(f"Missing columns: {sorted(missing)}")
     data = data.copy()
-    data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True)
+    data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True, errors="raise")
     if data.duplicated(["timestamp", "asset"]).any():
         raise ValueError("Duplicate (timestamp, asset) rows")
-    if (data["price"] <= 0).any() or data["price"].isna().any():
+    data["price"] = pd.to_numeric(data["price"], errors="raise")
+    data[signal_column] = pd.to_numeric(data[signal_column], errors="raise")
+    if (data["price"] <= 0).any() or not np.isfinite(data["price"]).all():
         raise ValueError("Price must be positive and non-null")
-    if data["signal"].isna().any() or ~data["signal"].map(pd.api.types.is_number).all():
-        raise ValueError("Signal must be numeric and non-null")
+    if data[signal_column].isna().any() or not np.isfinite(data[signal_column]).all():
+        raise ValueError(f"Signal column {signal_column} must be numeric and non-null")
+    if "funding_rate" in data:
+        data["funding_rate"] = pd.to_numeric(data["funding_rate"], errors="raise")
+        if data["funding_rate"].isna().any() or not np.isfinite(data["funding_rate"]).all():
+            raise ValueError("Funding rate must be finite and non-null")
     return data.sort_values(["timestamp", "asset"]).reset_index(drop=True)
+
+
+def _assign_liquidity_tier_rates(data, cfg):
+    liq = pd.to_numeric(data[cfg.liquidity_column], errors="coerce")
+    data["_liq_score"] = liq.groupby(data["asset"]).transform(lambda s: s.rolling(cfg.liquidity_lookback, min_periods=1).mean().shift(1))
+    pct = data.groupby("timestamp")["_liq_score"].rank(pct=True)
+    conds = [pct >= t[0] for t in cfg.liquidity_tiers]
+    most_illiquid = cfg.liquidity_tiers[-1]
+    data["_fee_rate"] = np.select(conds, [t[1] for t in cfg.liquidity_tiers], default=most_illiquid[1])
+    data["_slip_rate"] = np.select(conds, [t[2] for t in cfg.liquidity_tiers], default=most_illiquid[2])
+    return data
 
 
 def check_strategy(data, config=None):
     cfg = config or CheckerConfig()
-    data = _validate(data)
-    if cfg.n_long < 1 or cfg.n_short < 1 or cfg.initial_equity <= 0:
+    data = canonicalize_assets(data)
+    if cfg.require_funding and "funding_rate" not in data.columns:
+        raise ValueError("Funding rate column required for this strategy")
+    data = _validate(data, cfg.signal_column)
+    if cfg.signal_lookback > 1:
+        data[cfg.signal_column] = data.groupby("asset")[cfg.signal_column].transform(lambda x: x.rolling(cfg.signal_lookback, min_periods=cfg.signal_lookback).mean())
+        data = data.dropna(subset=[cfg.signal_column]).reset_index(drop=True)
+    if cfg.n_long < 1 or cfg.n_short < 1 or cfg.initial_equity <= 0 or cfg.gross_exposure <= 0 or cfg.fee_rate < 0 or cfg.slippage_rate < 0 or cfg.signal_lookback < 1 or cfg.min_signal_gap < 0 or cfg.rebalance_every < 1 or not 0 < cfg.max_drawdown_limit < 1 or not 0 < cfg.daily_loss_limit < 1 or cfg.vol_target_annual < 0 or cfg.vol_lookback < 2 or not 0 < cfg.vol_warmup_scale <= 1 or cfg.liquidity_lookback < 1:
         raise ValueError("Invalid checker configuration")
+    if cfg.liquidity_tiers:
+        thresholds = [t[0] for t in cfg.liquidity_tiers]
+        if any(not 0 <= th < 1 for th in thresholds) or any(t[1] < 0 or t[2] < 0 for t in cfg.liquidity_tiers) or thresholds != sorted(thresholds, reverse=True) or len(set(thresholds)) != len(thresholds):
+            raise ValueError("Invalid liquidity tiers; thresholds must be unique, within [0,1), and strictly descending")
+    tiered_costs = bool(cfg.liquidity_tiers and cfg.liquidity_column and cfg.liquidity_column in data.columns)
+    if tiered_costs:
+        data = _assign_liquidity_tier_rates(data, cfg)
     timestamps = list(data["timestamp"].drop_duplicates())
     positions = {}
-    ranking_rows, position_rows, trade_rows, pnl_rows = [], [], [], []
+    ranking_rows, position_rows, trade_rows, pnl_rows, violation_rows = [], [], [], [], []
     equity = cfg.initial_equity
+    peak_equity = cfg.initial_equity
+    trailing_returns = []
     prev_prices, prev_positions = {}, {}
-    for ts in timestamps:
-        cross = data[data.timestamp == ts].sort_values(["signal", "asset"], ascending=[False, True])
+    for period, ts in enumerate(timestamps):
+        next_ts = timestamps[period + 1] if period + 1 < len(timestamps) else pd.NaT
+        vol_scale = 1.0
+        if cfg.vol_target_annual > 0:
+            if len(trailing_returns) >= cfg.vol_lookback:
+                realized = float(np.std(trailing_returns[-cfg.vol_lookback:], ddof=1))
+                target_daily = cfg.vol_target_annual / (365 ** 0.5)
+                if realized > 0:
+                    vol_scale = min(1.0, target_daily / realized)
+            else:
+                vol_scale = cfg.vol_warmup_scale
+        cross = data[data.timestamp == ts].copy()
+        cross = cross.dropna(subset=[cfg.signal_column]).sort_values([cfg.signal_column, "asset"], ascending=[False, True])
         if len(cross) < cfg.n_long + cfg.n_short:
             raise ValueError(f"Not enough assets at {ts}")
         longs = cross.head(cfg.n_long)
         shorts = cross.tail(cfg.n_short)
-        long_assets, short_assets = set(longs.asset), set(shorts.asset)
-        if long_assets & short_assets:
-            raise AssertionError("Long/short ranking overlap")
-        w = cfg.gross_exposure / 2
-        positions = {a: w / cfg.n_long for a in long_assets}
-        positions.update({a: -w / cfg.n_short for a in short_assets})
-        ranking_rows.append({"timestamp": ts, "long_assets": ",".join(sorted(long_assets)), "short_assets": ",".join(sorted(short_assets)), "long_count": len(longs), "short_count": len(shorts), "rank_overlap": 0})
+        if period % cfg.rebalance_every and prev_positions:
+            positions = prev_positions.copy()
+        elif len(longs) and len(shorts) and float(longs[cfg.signal_column].iloc[-1] - shorts[cfg.signal_column].iloc[0]) < cfg.min_signal_gap and prev_positions:
+            positions = prev_positions.copy()
+        else:
+            w = cfg.gross_exposure / 2 * vol_scale
+            positions = {a: w / cfg.n_long for a in set(longs.asset)}
+            positions.update({a: -w / cfg.n_short for a in set(shorts.asset)})
+        long_assets = {a for a, v in positions.items() if v > 0}
+        short_assets = {a for a, v in positions.items() if v < 0}
+        overlap = long_assets & short_assets
+        if overlap:
+            raise AssertionError(f"Long/short ranking overlap: {sorted(overlap)}")
+        ranking_rows.append({"timestamp": ts, "long_assets": ",".join(sorted(long_assets)), "short_assets": ",".join(sorted(short_assets)), "long_count": len(long_assets), "short_count": len(short_assets), "rank_overlap": len(overlap)})
         current_prices = dict(zip(cross.asset, cross.price))
         for asset, weight in positions.items():
-            position_rows.append({"timestamp": ts, "asset": asset, "weight": weight, "price": current_prices[asset]})
+            position_rows.append({"signal_timestamp": ts, "execution_timestamp": next_ts, "timestamp": ts, "asset": asset, "weight": weight, "price": current_prices[asset]})
+        turnover_notional = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) for a in set(positions) | set(prev_positions)) * equity
         if prev_positions:
-            traded = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) for a in set(positions) | set(prev_positions)) * equity
             price_pnl = sum(prev_positions.get(a, 0) * equity * (current_prices[a] / prev_prices[a] - 1) for a in prev_positions if a in current_prices and a in prev_prices)
             funding_rates = dict(zip(cross.asset, cross["funding_rate"] if "funding_rate" in cross else [0.0] * len(cross)))
-            funding = sum((-prev_positions.get(a, 0) * equity * funding_rates.get(a, 0)) for a in prev_positions)
+            sign = -1 if cfg.funding_positive_paid_by_long else 1
+            funding = sum(sign * prev_positions.get(a, 0) * equity * funding_rates.get(a, 0) for a in prev_positions)
         else:
-            traded = price_pnl = funding = 0.0
-        fee = traded * cfg.fee_rate
-        slippage = traded * cfg.slippage_rate
+            price_pnl = funding = 0.0
+        if tiered_costs:
+            fee_rates = dict(zip(cross.asset, cross["_fee_rate"]))
+            slip_rates = dict(zip(cross.asset, cross["_slip_rate"]))
+            fee = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) * equity * fee_rates.get(a, cfg.fee_rate) for a in set(positions) | set(prev_positions))
+            slippage = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) * equity * slip_rates.get(a, cfg.slippage_rate) for a in set(positions) | set(prev_positions))
+        else:
+            fee = turnover_notional * cfg.fee_rate
+            slippage = turnover_notional * cfg.slippage_rate
         total = price_pnl + funding - fee - slippage
         equity += total
-        pnl_rows.append({"timestamp": ts, "price_pnl": price_pnl, "funding_pnl": funding, "fee_cost": fee, "slippage_cost": slippage, "total_pnl": total, "equity": equity, "return": total / (equity - total) if equity != total else 0, "turnover": traded / (equity - total) if equity != total else 0})
+        daily_return = total / (equity - total)
+        trailing_returns.append(daily_return)
+        drawdown = equity / peak_equity - 1
+        if daily_return < -cfg.daily_loss_limit:
+            violation_rows.append({"timestamp": ts, "type": "daily_loss_limit", "value": daily_return, "limit": -cfg.daily_loss_limit})
+        if drawdown < -cfg.max_drawdown_limit:
+            violation_rows.append({"timestamp": ts, "type": "max_drawdown_limit", "value": drawdown, "limit": -cfg.max_drawdown_limit})
+        if cfg.enforce_risk_limits and violation_rows and violation_rows[-1]["timestamp"] == ts:
+            raise RuntimeError(f"Risk limit breached at {ts}: {violation_rows[-1]['type']}")
+        pnl_rows.append({"timestamp": ts, "price_pnl": price_pnl, "funding_pnl": funding, "fee_cost": fee, "slippage_cost": slippage, "total_pnl": total, "equity": equity, "return": total / (equity - total) if equity != total else 0, "turnover": turnover_notional / (equity - total) if equity != total else 0})
         for asset in set(positions) | set(prev_positions):
-            trade_rows.append({"timestamp": ts, "asset": asset, "weight_change": positions.get(asset, 0) - prev_positions.get(asset, 0), "notional": abs(positions.get(asset, 0) - prev_positions.get(asset, 0)) * (equity - total)})
-        prev_positions, prev_prices = positions, current_prices
+            change = positions.get(asset, 0) - prev_positions.get(asset, 0)
+            if change:
+                trade_rows.append({"timestamp": ts, "asset": asset, "weight_change": change, "notional": abs(change) * (equity - total)})
+        prev_positions, prev_prices = positions.copy(), current_prices.copy()
     ranking = pd.DataFrame(ranking_rows)
-    exposure = pd.DataFrame([{"timestamp": row["timestamp"], "long_exposure": sum(max(v, 0) for v in row_positions.values()), "short_exposure": sum(abs(min(v, 0)) for v in row_positions.values()), "gross_exposure": sum(abs(v) for v in row_positions.values()), "net_exposure": sum(row_positions.values())} for row, row_positions in zip(ranking_rows, [{a: (cfg.gross_exposure / 2 / cfg.n_long if a in set(r["long_assets"].split(",")) else -cfg.gross_exposure / 2 / cfg.n_short) for a in r["long_assets"].split(",") + r["short_assets"].split(",")} for r in ranking_rows])])
+    position_frame = pd.DataFrame(position_rows)
+    exposure = position_frame.groupby("timestamp")["weight"].agg(long_exposure=lambda x: x[x > 0].sum(), short_exposure=lambda x: abs(x[x < 0].sum()), gross_exposure=lambda x: abs(x).sum(), net_exposure="sum").reset_index()
     turnover = pd.DataFrame(pnl_rows)
-    return {"ranking": ranking, "exposure": exposure, "turnover": turnover[["timestamp", "turnover"]], "trades": pd.DataFrame(trade_rows), "pnl": pd.DataFrame(pnl_rows), "violations": pd.DataFrame()}
+    pnl = pd.DataFrame(pnl_rows)
+    active_pnl = pnl.iloc[1:]
+    returns = active_pnl["return"]
+    equity_curve = pnl["equity"]
+    equity_full = pd.concat([pd.Series([cfg.initial_equity]), equity_curve], ignore_index=True)
+    drawdown = (equity_full / equity_full.cummax() - 1).iloc[1:]
+    summary = {"initial_equity": cfg.initial_equity, "final_equity": float(equity_curve.iloc[-1]), "total_return": float(equity_curve.iloc[-1] / cfg.initial_equity - 1), "periods": len(active_pnl), "annualized_return": float((equity_curve.iloc[-1] / cfg.initial_equity) ** (365 / max(len(active_pnl), 1)) - 1), "annualized_volatility": float(returns.std(ddof=1) * (365 ** 0.5)) if len(returns) > 1 else 0.0, "sharpe": float(returns.mean() / returns.std(ddof=1) * (365 ** 0.5)) if len(returns) > 1 and returns.std(ddof=1) else 0.0, "max_drawdown": float(drawdown.min()), "winning_periods": int((returns > 0).sum()), "losing_periods": int((returns < 0).sum()), "total_fees": float(pnl.fee_cost.sum()), "total_slippage": float(pnl.slippage_cost.sum()), "average_turnover": float(active_pnl.turnover.mean()) if len(active_pnl) else 0.0}
+    return {"ranking": ranking, "exposure": exposure, "positions": position_frame, "turnover": turnover[["timestamp", "turnover"]], "trades": pd.DataFrame(trade_rows), "pnl": pnl, "violations": pd.DataFrame(violation_rows), "metrics": summary}
 
 
 def write_reports(result, output_dir):
@@ -83,5 +175,6 @@ def write_reports(result, output_dir):
     for name, frame in result.items():
         if isinstance(frame, pd.DataFrame):
             frame.to_csv(Path(output_dir) / f"{name}.csv", index=False)
-    summary = {name: frame.tail(1).to_dict("records") if isinstance(frame, pd.DataFrame) and not frame.empty else [] for name, frame in result.items()}
+    summary = result.get("metrics", {})
+    summary["latest"] = {name: frame.tail(1).to_dict("records") for name, frame in result.items() if isinstance(frame, pd.DataFrame) and not frame.empty}
     (Path(output_dir) / "summary.json").write_text(json.dumps(summary, default=str, indent=2), encoding="utf-8")
