@@ -113,6 +113,22 @@ def test_momentum_signal_is_point_in_time():
     assert row["momentum_14"] == pytest.approx(expected)
 
 
+def test_build_signals_recomputes_stale_asset_return():
+    # Regression: a stale precomputed asset_return column (e.g. merged in
+    # from a partial downloader output) must not poison downstream signals.
+    # build_signals must always re-derive returns from price.
+    rows = [[f"2026-01-{d:02d}", "A", 100 + d] for d in range(1, 21)]
+    data = pd.DataFrame(rows, columns=["timestamp", "asset", "price"])
+    data["asset_return"] = float("nan")
+    data["signal"] = float("nan")
+    built = build_signals(data)
+    assert built["asset_return"].notna().sum() == 19
+    assert built["momentum_7"].notna().sum() > 0
+    row = built.iloc[18]
+    expected = built.iloc[11:18]["asset_return"].sum()
+    assert row["momentum_7"] == pytest.approx(expected)
+
+
 def test_carry_signal_is_negative_funding():
     data = pd.DataFrame([
         ["2026-01-01", "A", 100, 0, 0.01], ["2026-01-02", "A", 100, 0, -0.02],

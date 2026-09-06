@@ -187,6 +187,9 @@ def main():
     daily = funding.groupby(["date", "asset"], as_index=False)["funding_rate"].sum()
     freq_report.to_csv(out.parent / (out.stem + "_funding_frequency.csv"))
 
+    if "funding_rate" in klines.columns:
+        print("dropping pre-existing funding_rate column; refetching uniformly", flush=True)
+        klines = klines.drop(columns=["funding_rate"])
     klines["date"] = klines["timestamp"].dt.floor("D")
     merged = klines.merge(daily, on=["date", "asset"], how="left")
     merged = merged.drop(columns=["date"])

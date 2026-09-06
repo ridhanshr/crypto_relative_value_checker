@@ -32,8 +32,15 @@ def build_signals(data):
     frame = data.copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="raise")
     frame = frame.sort_values(["asset", "timestamp"]).reset_index(drop=True)
-    if "asset_return" not in frame.columns:
+    # price is the source of truth: always (re)derive returns from it.
+    # A stale precomputed asset_return column (e.g. merged in from a partial
+    # downloader output) would otherwise silently poison every downstream
+    # signal, since the old code skipped recomputation when the column existed.
+    if "price" in frame.columns:
+        frame = frame.drop(columns=["asset_return", "signal"], errors="ignore")
         frame["asset_return"] = frame.groupby("asset")["price"].pct_change()
+    elif "asset_return" not in frame.columns:
+        raise ValueError("Need price column to compute asset_return")
     for k in (7, 14, 30):
         frame[f"momentum_{k}"] = frame.groupby("asset")["asset_return"].transform(lambda s, k=k: s.shift(1).rolling(k, min_periods=k).sum())
         vol = frame.groupby("asset")["asset_return"].transform(lambda s, k=k: s.shift(1).rolling(k, min_periods=k).std())
