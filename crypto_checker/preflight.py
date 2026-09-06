@@ -3,6 +3,7 @@ import json
 import numpy as np
 import pandas as pd
 from .assets import canonicalize_assets, audit_migration_discontinuities, audit_migration_collisions, classify_funding_gaps
+from .lifecycle import build_lifecycle, INFERRED
 
 
 def validate_dataset(data, require_funding=False, require_liquidity=False, min_assets=2, min_periods=2, expected_frequency=None, allow_gaps=False):
@@ -110,7 +111,15 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
         funding_gap_summary = {reason: int((funding_gaps["reason"] == reason).sum()) for reason in ("not_listed", "delisted", "migration", "active")}
     membership = frame.groupby(["timestamp", "asset"]).size().reset_index(name="rows")
     membership["timestamp"] = membership["timestamp"].astype(str)
-    return {"valid": not errors, "errors": errors, "warnings": warnings, "rows": int(len(frame)), "assets": assets, "periods": periods, "start": str(frame["timestamp"].min()), "end": str(frame["timestamp"].max()), "funding_present": "funding_rate" in frame.columns, "liquidity_present": "quote_volume" in frame.columns, "funding_gap_summary": funding_gap_summary, "universe_membership": membership.to_dict("records"), "asset_status": statuses.astype(str).to_dict("records"), "delisting_suspects": suspects.astype(str).to_dict("records"), "survivorship_note": "Universe berasal dari simbol yang tersedia saat ini; tanpa verifikasi point-in-time membership independen, hasil IC/return berpotensi bias survivorship yang belum terukur."}
+    # Asset lifecycle engine: listed_at/delisted_at segments are the
+    # point-in-time universe authority. Inferred listing dates are
+    # placeholders -- replace with official listing dates before any
+    # survivorship-free claim.
+    lifecycle = build_lifecycle(frame)
+    inferred_listings = sorted(lifecycle[lifecycle["source"].str.contains(INFERRED, na=False)]["canonical"].unique().tolist())
+    if inferred_listings:
+        warnings.append(f"Lifecycle listing dates inferred from data (NOT official) for: {inferred_listings}; replace with exchange listing dates before survivorship-free claims")
+    return {"valid": not errors, "errors": errors, "warnings": warnings, "rows": int(len(frame)), "assets": assets, "periods": periods, "start": str(frame["timestamp"].min()), "end": str(frame["timestamp"].max()), "funding_present": "funding_rate" in frame.columns, "liquidity_present": "quote_volume" in frame.columns, "funding_gap_summary": funding_gap_summary, "universe_membership": membership.to_dict("records"), "asset_status": statuses.astype(str).to_dict("records"), "delisting_suspects": suspects.astype(str).to_dict("records"), "lifecycle_manifest": lifecycle.astype(str).to_dict("records"), "lifecycle_segments": int(len(lifecycle)), "survivorship_note": "Universe berasal dari simbol yang tersedia saat ini; tanpa verifikasi point-in-time membership independen, hasil IC/return berpotensi bias survivorship yang belum terukur."}
 
 
 def write_preflight(result, output_dir):

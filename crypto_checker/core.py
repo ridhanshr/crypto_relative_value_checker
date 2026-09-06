@@ -123,20 +123,48 @@ def _assign_liquidity_tier_rates(data, cfg):
     return data
 
 
+def _shift_signal_for_execution(data, signal_column):
+    """Enforce the single execution rule: signal(t) executes at t+1.
+
+    The ranked signal is shifted one bar within each asset BEFORE smoothing,
+    validation, or ranking, so the value ranked at bar t contains only
+    information available at/before close(t-1) and is filled at close(t)
+    prices. This applies uniformly to built-in factors (which already
+    self-lag and therefore pay one extra bar -- the price of a single
+    uniform rule), custom signal columns, and the default contemporaneous
+    signal. No signal, however constructed, can ever trade on same-bar
+    information. The first bar per asset has no executable signal and is
+    dropped.
+    """
+    frame = data.copy()
+    if signal_column not in frame.columns:
+        # Let _validate raise the proper "Missing columns" error.
+        return frame
+    frame[signal_column] = frame.groupby("asset")[signal_column].transform(lambda s: s.shift(1))
+    return frame.dropna(subset=[signal_column]).reset_index(drop=True)
+
+
 def check_strategy(data, config=None):
     """Run the cross-sectional long-short backtest.
 
-    Timing convention (timestamps are candle OPEN times; ``price`` is the
-    candle close):
-      * signal(t) may only use information available at/before close(t)
-        (all built-in factors are shift(1)-lagged or contemporaneous-t).
-      * Positions decided at t are executed at the next bar open, i.e. at
-        close(t) prices, and first earn PnL over the t -> t+1 move. No PnL
-        is ever accrued in the same bar the signal is observed.
+    Timing convention -- THE single execution rule (timestamps are candle
+    OPEN times; ``price`` is the candle close):
+      * signal(t) executes at t+1, enforced by shifting the ranked signal
+        one bar within each asset before anything else. The value ranked
+        at bar t holds only information available at/before close(t-1).
+      * Positions decided at t are filled at close(t) prices and first earn
+        PnL over the t -> t+1 move. No PnL is ever accrued in the same bar
+        whose information produced the signal.
       * ``execution_timestamp`` in position rows is therefore always the
         timestamp following ``signal_timestamp``.
     """
     cfg = config or CheckerConfig()
+    if cfg.n_long < 1 or cfg.n_short < 1 or cfg.initial_equity <= 0 or cfg.gross_exposure <= 0 or cfg.fee_rate < 0 or cfg.slippage_rate < 0 or cfg.signal_lookback < 1 or cfg.min_signal_gap < 0 or cfg.rebalance_every < 1 or not 0 < cfg.max_drawdown_limit < 1 or not 0 < cfg.daily_loss_limit < 1 or cfg.vol_target_annual < 0 or cfg.vol_lookback < 2 or not 0 < cfg.vol_warmup_scale <= 1 or cfg.liquidity_lookback < 1 or not 0 < cfg.max_volume_participation <= 1 or cfg.cost_multiplier < 0 or cfg.delist_mode not in ("error", "forced_exit") or cfg.slippage_mode not in ("tier", "spread") or (cfg.periods_per_year is not None and cfg.periods_per_year <= 0):
+        raise ValueError("Invalid checker configuration")
+    if cfg.liquidity_tiers:
+        thresholds = [t[0] for t in cfg.liquidity_tiers]
+        if any(not 0 <= th < 1 for th in thresholds) or any(t[1] < 0 or t[2] < 0 for t in cfg.liquidity_tiers) or thresholds != sorted(thresholds, reverse=True) or len(set(thresholds)) != len(thresholds):
+            raise ValueError("Invalid liquidity tiers; thresholds must be unique, within [0,1), and strictly descending")
     if cfg.reject_migration_collisions and not audit_migration_collisions(data).empty:
         raise ValueError("Migration source collision detected; resolve effective-date overlap before backtest")
     # Funding is a post-ranking cost model: missing funding never removes an
@@ -149,16 +177,13 @@ def check_strategy(data, config=None):
         raise ValueError("Funding rate column required for this strategy")
     if "funding_rate" in data.columns:
         data["funding_rate"] = data["funding_rate"].fillna(0.0)
+    data = _shift_signal_for_execution(data, cfg.signal_column)
+    if data.empty:
+        raise ValueError("No executable signals: the t+1 execution lag consumed all bars; provide at least 2 bars per asset")
     data = _validate(data, cfg.signal_column)
     if cfg.signal_lookback > 1:
         data[cfg.signal_column] = data.groupby("asset")[cfg.signal_column].transform(lambda x: x.rolling(cfg.signal_lookback, min_periods=cfg.signal_lookback).mean())
         data = data.dropna(subset=[cfg.signal_column]).reset_index(drop=True)
-    if cfg.n_long < 1 or cfg.n_short < 1 or cfg.initial_equity <= 0 or cfg.gross_exposure <= 0 or cfg.fee_rate < 0 or cfg.slippage_rate < 0 or cfg.signal_lookback < 1 or cfg.min_signal_gap < 0 or cfg.rebalance_every < 1 or not 0 < cfg.max_drawdown_limit < 1 or not 0 < cfg.daily_loss_limit < 1 or cfg.vol_target_annual < 0 or cfg.vol_lookback < 2 or not 0 < cfg.vol_warmup_scale <= 1 or cfg.liquidity_lookback < 1 or not 0 < cfg.max_volume_participation <= 1 or cfg.cost_multiplier < 0 or cfg.delist_mode not in ("error", "forced_exit") or cfg.slippage_mode not in ("tier", "spread") or (cfg.periods_per_year is not None and cfg.periods_per_year <= 0):
-        raise ValueError("Invalid checker configuration")
-    if cfg.liquidity_tiers:
-        thresholds = [t[0] for t in cfg.liquidity_tiers]
-        if any(not 0 <= th < 1 for th in thresholds) or any(t[1] < 0 or t[2] < 0 for t in cfg.liquidity_tiers) or thresholds != sorted(thresholds, reverse=True) or len(set(thresholds)) != len(thresholds):
-            raise ValueError("Invalid liquidity tiers; thresholds must be unique, within [0,1), and strictly descending")
     tiered_costs = bool(cfg.liquidity_tiers and cfg.liquidity_column and cfg.liquidity_column in data.columns)
     if tiered_costs:
         data = _assign_liquidity_tier_rates(data, cfg)

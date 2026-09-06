@@ -25,7 +25,7 @@ def evaluate_deployable(gates):
     return all(bool(gates.get(name, False)) for name in HARD_GATES)
 
 
-def deployment_decision(data, output_dir="reports/research", min_train_days=365, test_days=120, candidates=None, n_sides_grid=(3,), vol_target_annual=0.20, rebalance_every=5, fee_rate=0.0004, slippage_rate=0.0005, require_funding=False, spread_check_passed=False, delist_mode="error"):
+def deployment_decision(data, output_dir="reports/research", min_train_days=365, test_days=120, candidates=None, n_sides_grid=(3,), vol_target_annual=0.20, rebalance_every=5, fee_rate=0.0004, slippage_rate=0.0005, require_funding=False, spread_check_passed=False, delist_mode="error", ensemble_top_k=0):
     from .signals import build_signals, available_candidates
     built = build_signals(data)
     all_candidates = available_candidates(built)
@@ -41,7 +41,7 @@ def deployment_decision(data, output_dir="reports/research", min_train_days=365,
             ic_pass.append(row["signal"])
     rc = reality_check(ic_table)
 
-    wf = walk_forward(data, base_config=CheckerConfig(fee_rate=fee_rate, slippage_rate=slippage_rate, rebalance_every=rebalance_every, require_funding=require_funding, delist_mode=delist_mode), min_train_days=min_train_days, test_days=test_days, candidates=wf_candidates, n_sides_grid=n_sides_grid, vol_target_annual=vol_target_annual, output_dir=output_dir)
+    wf = walk_forward(data, base_config=CheckerConfig(fee_rate=fee_rate, slippage_rate=slippage_rate, rebalance_every=rebalance_every, require_funding=require_funding, delist_mode=delist_mode), min_train_days=min_train_days, test_days=test_days, candidates=wf_candidates, n_sides_grid=n_sides_grid, vol_target_annual=vol_target_annual, output_dir=output_dir, ensemble_top_k=ensemble_top_k)
     best_signal = pd.Series([f["signal"] for f in wf["folds"]]).mode().iloc[0]
     best_n = int(pd.Series([f["n_sides"] for f in wf["folds"]]).mode().iloc[0])
     config = CheckerConfig(n_long=best_n, n_short=best_n, fee_rate=fee_rate, slippage_rate=slippage_rate, signal_column=best_signal, vol_target_annual=vol_target_annual, rebalance_every=rebalance_every, require_funding=require_funding, delist_mode=delist_mode)
@@ -66,11 +66,15 @@ def deployment_decision(data, output_dir="reports/research", min_train_days=365,
         "no_capacity_violations": validation["gates"].get("no_capacity_violations", False),
         "oos_positive": validation["gates"]["oos_positive"],
         "reality_check_pass": bool(rc.get("pass", False)),
+        "dsr_above_95": bool((wf.get("data_mining") or {}).get("dsr", 0.0) >= 0.95),
         "spread_check_passed": bool(spread_check_passed),
         "majority_regimes_profitable": bool(profitable_regimes >= len(regime_rows) * REGIME_MIN_PROFIT),
     }
     decision = {
         "best_signal_walk_forward": str(best_signal),
+        "candidate_alpha_note": "best_signal_walk_forward is a CANDIDATE alpha, not a final alpha: the engine finds, tests, and kills alphas; production uses ensembles/combinations, never winner-takes-all",
+        "data_mining": wf.get("data_mining"),
+        "ensemble": wf.get("ensemble"),
         "best_n_sides": best_n,
         "config": {"n_long": best_n, "n_short": best_n, "fee_rate": fee_rate, "slippage_rate": slippage_rate, "vol_target_annual": vol_target_annual, "rebalance_every": rebalance_every},
         "ic_pass_signals": ic_pass,

@@ -11,34 +11,39 @@ from crypto_checker.preflight import validate_dataset
 
 
 def test_ranking_exposure_and_costs():
+    # t+1 execution: ranked at t2 on t1 signals (long A / short D, filled at
+    # t2 closes 110/90); PnL accrues t2 -> t3 (A +10%, D -10% short wins).
     data = pd.DataFrame([
         ["2026-01-01", "A", 100, 4], ["2026-01-01", "B", 100, 3], ["2026-01-01", "C", 100, 2], ["2026-01-01", "D", 100, 1],
-        ["2026-01-02", "A", 110, 1], ["2026-01-02", "B", 100, 2], ["2026-01-02", "C", 100, 3], ["2026-01-02", "D", 90, 4],
+        ["2026-01-02", "A", 110, 4], ["2026-01-02", "B", 100, 3], ["2026-01-02", "C", 100, 2], ["2026-01-02", "D", 90, 1],
+        ["2026-01-03", "A", 121, 4], ["2026-01-03", "B", 100, 3], ["2026-01-03", "C", 100, 2], ["2026-01-03", "D", 81, 1],
     ], columns=["timestamp", "asset", "price", "signal"])
     result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0.001, slippage_rate=0))
     assert result["ranking"].iloc[0].long_assets == "A"
     assert result["exposure"].iloc[0].gross_exposure == 2
-    assert result["pnl"].iloc[1].total_pnl == pytest.approx(19560.8)
+    assert result["pnl"].iloc[1].total_pnl == pytest.approx(19960.0)
     assert result["metrics"]["periods"] == 1
     assert result["trades"].notna().all().all()
 
 
 def test_rejects_invalid_values():
-    data = pd.DataFrame([["2026-01-01", "A", 0, 1], ["2026-01-01", "B", 1, 0]], columns=["timestamp", "asset", "price", "signal"])
+    data = pd.DataFrame([["2026-01-01", "A", 0, 1], ["2026-01-01", "B", 1, 0], ["2026-01-02", "A", 0, 1], ["2026-01-02", "B", 1, 0]], columns=["timestamp", "asset", "price", "signal"])
     with pytest.raises(ValueError, match="Price"):
         check_strategy(data, CheckerConfig(n_long=1, n_short=1))
 
 
 def test_funding_long_is_paid_and_short_received():
-    data = pd.DataFrame([["2026-01-01", "A", 100, 2, 0.01], ["2026-01-01", "B", 100, 1, 0.01], ["2026-01-02", "A", 100, 2, 0.01], ["2026-01-02", "B", 100, 1, 0.01]], columns=["timestamp", "asset", "price", "signal", "funding_rate"])
+    data = pd.DataFrame([["2026-01-01", "A", 100, 2, 0.01], ["2026-01-01", "B", 100, 1, 0.01], ["2026-01-02", "A", 100, 2, 0.01], ["2026-01-02", "B", 100, 1, 0.01], ["2026-01-03", "A", 100, 2, 0.01], ["2026-01-03", "B", 100, 1, 0.01]], columns=["timestamp", "asset", "price", "signal", "funding_rate"])
     result = check_strategy(data, CheckerConfig(n_long=1, n_short=1))
     assert result["pnl"].iloc[1].funding_pnl == 0
 
 
 def test_rebalance_charges_turnover_and_costs():
+    # t+1 execution: entry at t2 on t1 signals, flip at t3 on t2 signals.
     data = pd.DataFrame([
         ["2026-01-01", "A", 100, 4], ["2026-01-01", "B", 100, 3], ["2026-01-01", "C", 100, 2], ["2026-01-01", "D", 100, 1],
         ["2026-01-02", "A", 100, 1], ["2026-01-02", "B", 100, 2], ["2026-01-02", "C", 100, 3], ["2026-01-02", "D", 100, 4],
+        ["2026-01-03", "A", 100, 1], ["2026-01-03", "B", 100, 2], ["2026-01-03", "C", 100, 3], ["2026-01-03", "D", 100, 4],
     ], columns=["timestamp", "asset", "price", "signal"])
     result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0.001, slippage_rate=0.001))
     assert result["pnl"].iloc[1].turnover == pytest.approx(4.0)
@@ -76,7 +81,7 @@ def test_nan_funding_tolerated_as_post_ranking_cost():
 
 
 def test_rejects_nonfinite_funding():
-    data = pd.DataFrame([["2026-01-01", "A", 100, 2, float("inf")], ["2026-01-01", "B", 100, 1, 0.0]], columns=["timestamp", "asset", "price", "signal", "funding_rate"])
+    data = pd.DataFrame([["2026-01-01", "A", 100, 2, float("inf")], ["2026-01-01", "B", 100, 1, 0.0], ["2026-01-02", "A", 100, 2, float("inf")], ["2026-01-02", "B", 100, 1, 0.0]], columns=["timestamp", "asset", "price", "signal", "funding_rate"])
     with pytest.raises(ValueError, match="Funding rate"):
         check_strategy(data, CheckerConfig(n_long=1, n_short=1))
 
@@ -88,16 +93,22 @@ def test_require_funding_rejects_price_only_input():
 
 
 def test_positions_expose_next_execution_timestamp():
-    data = pd.DataFrame([["2026-01-01", "A", 100, 2], ["2026-01-01", "B", 100, 1], ["2026-01-02", "A", 100, 2], ["2026-01-02", "B", 100, 1]], columns=["timestamp", "asset", "price", "signal"])
+    data = pd.DataFrame([["2026-01-01", "A", 100, 2], ["2026-01-01", "B", 100, 1], ["2026-01-02", "A", 100, 2], ["2026-01-02", "B", 100, 1], ["2026-01-03", "A", 100, 2], ["2026-01-03", "B", 100, 1]], columns=["timestamp", "asset", "price", "signal"])
     positions = check_strategy(data, CheckerConfig(n_long=1, n_short=1))["positions"]
     assert positions.iloc[0].execution_timestamp > positions.iloc[0].signal_timestamp
+    # Every decided position is filled at a strictly later bar (t+1 rule).
+    decided = positions.dropna(subset=["execution_timestamp"])
+    assert (decided["execution_timestamp"] > decided["signal_timestamp"]).all()
 
 
 def test_max_drawdown_measured_from_initial_equity():
+    # t+1 execution: position opens at t2 close (A=100); the t2 -> t3 drop
+    # to 80 then drives drawdown to -0.20 from initial equity.
     data = pd.DataFrame([
         ["2026-01-01", "A", 100, 2], ["2026-01-01", "B", 100, 1],
-        ["2026-01-02", "A", 80, 2], ["2026-01-02", "B", 100, 1],
-        ["2026-01-03", "A", 85, 2], ["2026-01-03", "B", 100, 1],
+        ["2026-01-02", "A", 100, 2], ["2026-01-02", "B", 100, 1],
+        ["2026-01-03", "A", 80, 2], ["2026-01-03", "B", 100, 1],
+        ["2026-01-04", "A", 85, 2], ["2026-01-04", "B", 100, 1],
     ], columns=["timestamp", "asset", "price", "signal"])
     result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0, slippage_rate=0))
     summary = result["metrics"]
@@ -159,6 +170,8 @@ def test_ranking_uses_configured_signal_column():
     data = pd.DataFrame([
         ["2026-01-01", "A", 100, 4, 1], ["2026-01-01", "B", 100, 3, 4],
         ["2026-01-01", "C", 100, 2, 3], ["2026-01-01", "D", 100, 1, 2],
+        ["2026-01-02", "A", 100, 4, 1], ["2026-01-02", "B", 100, 3, 4],
+        ["2026-01-02", "C", 100, 2, 3], ["2026-01-02", "D", 100, 1, 2],
     ], columns=["timestamp", "asset", "price", "signal", "momentum_30"])
     result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, signal_column="momentum_30"))
     assert result["ranking"].iloc[0].long_assets == "B"
@@ -347,9 +360,12 @@ def test_capacity_violation_is_reported():
 
 
 def test_missing_held_price_is_hard_error():
+    # t+1 execution: position opens at t2 on t1 signals (long A), then A
+    # disappears at t3 -> hard error.
     data = pd.DataFrame([
         ["2024-01-01", "A", 100, 2], ["2024-01-01", "B", 100, 1],
-        ["2024-01-02", "B", 100, 2],
+        ["2024-01-02", "A", 100, 2], ["2024-01-02", "B", 100, 1],
+        ["2024-01-03", "B", 100, 2],
     ], columns=["timestamp", "asset", "price", "signal"])
     with pytest.raises(ValueError, match="Missing price for held positions"):
         check_strategy(data, CheckerConfig(n_long=1, n_short=1))
@@ -372,9 +388,12 @@ def test_cost_multiplier_scales_tiered_fees():
 
 
 def test_forced_exit_closes_disappeared_holding():
+    # t+1 execution: long A opens at t2 on t1 signals; A disappears at t3
+    # while B/C remain rankable -> forced_exit + negative weight change.
     data = pd.DataFrame([
         ["2024-01-01", "A", 100, 2], ["2024-01-01", "B", 100, 1],
-        ["2024-01-02", "B", 100, 2], ["2024-01-02", "C", 100, 1],
+        ["2024-01-02", "A", 100, 2], ["2024-01-02", "B", 100, 1], ["2024-01-02", "C", 100, 1],
+        ["2024-01-03", "B", 100, 2], ["2024-01-03", "C", 100, 1],
     ], columns=["timestamp", "asset", "price", "signal"])
     result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, delist_mode="forced_exit"))
     types = result["violations"]["type"].tolist()
@@ -717,3 +736,158 @@ def test_funding_frequency_report_aggregates_sub8h_and_flags_extremes():
     assert daily[(daily.asset == "X") & (daily.date == "2026-01-01")]["funding_rate"].iloc[0] == pytest.approx(-0.096)
     assert freq_report.loc["X", "max_abs_daily_rate"] == pytest.approx(-0.096)
     assert str(freq_report.loc["X", "max_abs_daily_rate_date"]) == "2026-01-01 00:00:00+00:00"
+
+
+def test_execution_uses_prior_bar_signal_only():
+    # THE single rule: ranking at bar t must use raw signals from t-1.
+    # A spikes raw to 10 at t2 only; B is flat 1. Decisions must flip at
+    # t3 (observing the spike), never at t2 (same bar as the spike).
+    data = pd.DataFrame([
+        ["2026-01-01", "A", 100, 0], ["2026-01-01", "B", 100, 1],
+        ["2026-01-02", "A", 100, 10], ["2026-01-02", "B", 100, 1],
+        ["2026-01-03", "A", 100, 0], ["2026-01-03", "B", 100, 1],
+        ["2026-01-04", "A", 100, 0], ["2026-01-04", "B", 100, 1],
+    ], columns=["timestamp", "asset", "price", "signal"])
+    result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0, slippage_rate=0))
+    ranking = result["ranking"]
+    assert ranking.iloc[0]["timestamp"] == pd.Timestamp("2026-01-02", tz="UTC")
+    assert ranking.iloc[0]["long_assets"] == "B"
+    assert ranking.iloc[1]["long_assets"] == "A"
+    assert ranking.iloc[2]["long_assets"] == "B"
+
+
+def test_execution_lag_with_no_bars_left_is_hard_error():
+    data = pd.DataFrame([["2026-01-01", "A", 100, 2], ["2026-01-01", "B", 100, 1]], columns=["timestamp", "asset", "price", "signal"])
+    with pytest.raises(ValueError, match="No executable signals"):
+        check_strategy(data, CheckerConfig(n_long=1, n_short=1))
+
+
+def test_lifecycle_build_marks_migration_and_inferred_dates():
+    from crypto_checker.lifecycle import build_lifecycle, active_assets
+    data = pd.DataFrame([
+        ["2024-07-10", "GALUSDT", 5.0], ["2024-07-11", "GALUSDT", 5.1], ["2024-07-12", "GALUSDT", 5.0],
+        ["2024-07-20", "GUSDT", 0.08], ["2024-07-21", "GUSDT", 0.09], ["2024-07-22", "GUSDT", 0.08],
+        ["2024-07-10", "BTCUSDT", 60000.0], ["2024-07-22", "BTCUSDT", 65000.0],
+    ], columns=["timestamp", "asset", "price"])
+    life = build_lifecycle(data)
+    gal = life[(life["canonical"] == "GUSDT") & (life["symbol"] == "GALUSDT")].iloc[0]
+    assert gal["event"] == "migration_source"
+    assert str(gal["delisted_at"]) == "2024-07-19 08:00:00+00:00"
+    assert "official" in gal["source"]
+    g = life[(life["canonical"] == "GUSDT") & (life["symbol"] == "GUSDT")].iloc[0]
+    assert g["event"] == "migration_target"
+    assert str(g["listed_at"]) == "2024-07-19 08:00:00+00:00"
+    btc = life[life["canonical"] == "BTCUSDT"].iloc[0]
+    assert btc["event"] == "active" and pd.isna(btc["delisted_at"])
+    assert "inferred_from_data" in btc["source"]
+    assert active_assets(life, "2024-07-11") == ["BTCUSDT", "GUSDT"]
+    assert active_assets(life, "2024-07-21") == ["BTCUSDT", "GUSDT"]
+
+
+def test_lifecycle_compliance_flags_trading_outside_segment():
+    import pandas as pd
+    from crypto_checker.lifecycle import audit_universe_compliance
+    official = pd.DataFrame([{
+        "canonical": "GUSDT", "symbol": "GUSDT",
+        "listed_at": pd.Timestamp("2024-07-19 08:00:00+00:00"),
+        "delisted_at": pd.NaT, "event": "migration_target", "source": "official",
+    }])
+    data = pd.DataFrame([
+        ["2024-07-11", "GUSDT", 0.08],
+        ["2024-07-20", "GUSDT", 0.09],
+    ], columns=["timestamp", "asset", "price"])
+    violations = audit_universe_compliance(data, official)
+    assert len(violations) == 1
+    assert violations.iloc[0]["reason"] == "trading_before_listing"
+
+
+def test_lifecycle_manifest_roundtrip_and_preflight_hook(tmp_path):
+    from crypto_checker.lifecycle import build_lifecycle, write_lifecycle_manifest, load_lifecycle_manifest
+    data = pd.DataFrame([
+        ["2024-01-01", "AUSDT", 100.0, 2], ["2024-01-02", "AUSDT", 101.0, 2],
+        ["2024-01-01", "BUSDT", 50.0, 1], ["2024-01-02", "BUSDT", 51.0, 1],
+    ], columns=["timestamp", "asset", "price", "signal"])
+    life = build_lifecycle(data)
+    path = write_lifecycle_manifest(life, tmp_path / "lifecycle_manifest.csv")
+    reloaded = load_lifecycle_manifest(path)
+    assert list(reloaded.columns) == ["canonical", "symbol", "listed_at", "delisted_at", "event", "source"]
+    assert len(reloaded) == len(life)
+    check = validate_dataset(data)
+    assert "lifecycle_manifest" in check and check["lifecycle_segments"] == len(life)
+    assert any("inferred from data" in w for w in check["warnings"])
+
+
+def test_deflated_sharpe_ratio_properties():
+    from statistics import NormalDist
+    from crypto_checker.reality_check import deflated_sharpe_ratio
+    # No selection (1 trial): DSR == Probabilistic Sharpe Ratio, verifiable
+    # inline without reusing the implementation.
+    # Unsaturated regime (SR 0.3, T 120): selection over 200 trials must
+    # visibly deflate the naive probability.
+    out = deflated_sharpe_ratio(observed_sr=0.3, n_trials=1, skew=0.0, kurtosis=3.0, n_obs=120, trials_variance=0.04)
+    assert out["expected_sharpe_null"] == 0.0
+    # PSR with the kurtosis adjustment written out explicitly (Pearson
+    # kurtosis 3 -> denominator sqrt(1 + SR^2/2)).
+    expected_psr = NormalDist().cdf(0.3 * (119 ** 0.5) / ((1 + 0.3 ** 2 / 2) ** 0.5))
+    assert out["dsr"] == pytest.approx(expected_psr)
+    # More trials tried -> higher null bar -> lower DSR.
+    wide = deflated_sharpe_ratio(observed_sr=0.3, n_trials=200, skew=0.0, kurtosis=3.0, n_obs=120, trials_variance=0.04)
+    assert wide["expected_sharpe_null"] > 0.0
+    assert wide["dsr"] < out["dsr"]
+    # Below the null bar -> DSR under a coin flip.
+    bad = deflated_sharpe_ratio(observed_sr=0.1, n_trials=200, skew=0.0, kurtosis=3.0, n_obs=500, trials_variance=0.25)
+    assert bad["dsr"] < 0.5
+    # Degenerate inputs fail closed, never NaN.
+    empty = deflated_sharpe_ratio(observed_sr=1.0, n_trials=5, skew=0.0, kurtosis=3.0, n_obs=1, trials_variance=0.1)
+    assert empty["dsr"] == 0.0
+
+
+def test_capacity_curve_flags_aum_where_sensible_stops():
+    from crypto_checker.capacity import capacity_curve
+    rows = []
+    for d in ("2026-01-01", "2026-01-02", "2026-01-03"):
+        rows.append([d, "A", 100, 2, 10_000_000.0])
+        rows.append([d, "B", 100, 1, 10_000_000.0])
+    data = pd.DataFrame(rows, columns=["timestamp", "asset", "price", "signal", "quote_volume"])
+    cfg = CheckerConfig(n_long=1, n_short=1, fee_rate=0, slippage_rate=0, liquidity_column="quote_volume", liquidity_tiers=((0.0, 0.0, 0.0),))
+    report = capacity_curve(data, base_config=cfg, aum_levels=(10_000.0, 10_000_000.0))
+    assert report["status"] == "ok"
+    small, huge = report["levels"]
+    assert small["sensible"] and small["capacity_violations"] == 0 and small["headroom_multiple"] > 1
+    assert not huge["sensible"] and huge["capacity_violations"] > 0 and huge["breach_trades"] > 0 and huge["headroom_multiple"] < 1
+    assert small["total_return"] == pytest.approx(huge["total_return"])
+
+
+def test_capacity_refuses_without_liquidity_column():
+    from crypto_checker.capacity import capacity_curve
+    data = pd.DataFrame([
+        ["2026-01-01", "A", 100, 2], ["2026-01-01", "B", 100, 1],
+        ["2026-01-02", "A", 100, 2], ["2026-01-02", "B", 100, 1],
+    ], columns=["timestamp", "asset", "price", "signal"])
+    report = capacity_curve(data, base_config=CheckerConfig(n_long=1, n_short=1))
+    assert report["status"] == "no_liquidity_data"
+
+
+def test_walk_forward_reports_dsr_and_ensemble():
+    rng = np.random.default_rng(21)
+    dates = pd.date_range("2024-01-01", periods=300, freq="D", tz="UTC")
+    frames = []
+    for i in range(4):
+        prices = 100 * np.exp(np.cumsum(rng.normal(0.0005, 0.02, len(dates))))
+        frames.append(pd.DataFrame({"timestamp": dates, "asset": f"A{i}", "price": prices, "funding_rate": rng.normal(0, 0.0002, len(dates))}))
+    data = pd.concat(frames, ignore_index=True)
+    result = walk_forward(
+        data,
+        base_config=CheckerConfig(n_long=1, n_short=1, min_signal_gap=0),
+        min_train_days=100, test_days=40,
+        candidates=["momentum_7", "reversal_1"], n_sides_grid=(1,),
+        ensemble_top_k=2,
+    )
+    dm = result["data_mining"]
+    assert dm["n_trials"] > 0
+    assert 0.0 <= dm["dsr"] <= 1.0
+    assert dm["expected_sharpe_null"] >= 0.0
+    ens = result["ensemble"]
+    assert ens["top_k"] == 2 and len(ens["members_per_fold"]) == result["n_folds"]
+    assert all(len(m["members"]) >= 1 for m in ens["members_per_fold"])
+    assert "diagnostic_only" in ens["note"]

@@ -1,5 +1,10 @@
+import math
+from statistics import NormalDist
 import numpy as np
 import pandas as pd
+
+
+EULER_GAMMA = 0.5772156649015329
 
 
 def newey_west_tstat(values, lags=None):
@@ -40,3 +45,38 @@ def multiple_testing_adjusted_pvalue(tstat, tests):
         return 1.0
     from math import erfc, sqrt
     return float(min(1.0, tests * erfc(abs(float(tstat)) / sqrt(2))))
+
+
+def deflated_sharpe_ratio(observed_sr, n_trials, skew, kurtosis, n_obs, trials_variance, benchmark_sr=0.0):
+    """Bailey & de Prado (2014) Deflated Sharpe Ratio.
+
+    Corrects the observed (annualized) Sharpe for selection bias over
+    ``n_trials`` tried configurations: DSR = Prob[true SR > benchmark]
+    accounting for the expected maximum Sharpe under the null.
+
+    * ``observed_sr``: annualized Sharpe of the SELECTED strategy.
+    * ``trials_variance``: variance of the (annualized) Sharpes across all
+      tried configurations -- the wider the search, the higher the bar.
+    * ``skew``: sample skewness of the selected strategy returns.
+    * ``kurtosis``: PEARSON kurtosis (normal == 3) of the selected returns.
+    * ``n_obs``: number of return observations.
+    * With fewer than 2 trials there is no selection bias and DSR reduces
+      to the Probabilistic Sharpe Ratio against ``benchmark_sr``.
+    """
+    obs = float(observed_sr) - float(benchmark_sr)
+    n = int(n_trials)
+    T = int(n_obs)
+    result = {"n_trials": n, "n_obs": T, "observed_sr": float(observed_sr), "benchmark_sr": float(benchmark_sr)}
+    if T < 2:
+        return {**result, "expected_sharpe_null": 0.0, "dsr": 0.0, "note": "insufficient_observations"}
+    var = float(trials_variance) if trials_variance is not None else 0.0
+    if n < 2 or not math.isfinite(var) or var <= 0:
+        expected_null = 0.0
+    else:
+        nd = NormalDist()
+        expected_null = math.sqrt(var) * ((1 - EULER_GAMMA) * nd.inv_cdf(1 - 1 / n) + EULER_GAMMA * nd.inv_cdf(1 - 1 / (n * math.e)))
+    denom_sq = 1 - float(skew) * obs + (float(kurtosis) - 1) / 4 * obs ** 2
+    if not math.isfinite(denom_sq) or denom_sq <= 0:
+        return {**result, "expected_sharpe_null": float(expected_null), "dsr": 0.0, "note": "degenerate_return_distribution"}
+    stat = (obs - expected_null) * math.sqrt(T - 1) / math.sqrt(denom_sq)
+    return {**result, "expected_sharpe_null": float(expected_null), "dsr": float(NormalDist().cdf(stat))}

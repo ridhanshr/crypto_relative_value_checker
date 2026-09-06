@@ -140,8 +140,18 @@ Sebelum backtest, `preflight.json` memeriksa: kolom wajib, timestamp UTC, harga 
 - `asset_status`: first/last seen + status (`active_full_period` / `partial_history_or_delisted`).
 - `delisting_suspects`: aset yang berhenti jauh sebelum tanggal akhir — hari terakhirnya wajib diperlakukan sebagai forced exit, bukan dibuang diam-diam.
 - `survivorship_note`: universe berasal dari simbol aktif saat ini; tanpa verifikasi membership independen, hasil berpotensi bias survivorship yang belum terukur.
+- `lifecycle_manifest`: segmen `listed_at`/`delisted_at` per (canonical, source symbol) — otoritas universe point-in-time (lihat Asset Lifecycle Engine). Tanggal listing yang masih `inferred_from_data` diberi warning eksplisit: ganti dengan tanggal listing resmi sebelum klaim survivorship-free.
 
 Mode eksplorasi `price_only` mentoleransi gap kecil (jadi warning + forced exit di backtest); mode futures menolak gap apa pun.
+
+## Asset Lifecycle Engine (`crypto_checker/lifecycle.py`)
+
+Fondasi universe construction: tiap aset canonical dipecah menjadi segmen `(symbol, listed_at, delisted_at, event, source)`.
+
+- Batas migrasi (GAL→G, MATIC→POL, ...) memakai effective date resmi pengumuman (`source: official`); tanggal listing/delisting sisanya diinferensi dari first/last seen (`source: inferred_from_data` — placeholder, bukan fakta).
+- `active_assets(lifecycle, ts)` menjawab "apa yang tradable di instant t" — backtest konsisten dengan ini by construction (ranking hanya memakai aset yang hadir di bar t; tidak ada forward fill).
+- `audit_universe_compliance(data, lifecycle)` memeriksa dataset terhadap manifest **independen** (mis. yang dikurasi manual dari tanggal resmi) dan menandai `trading_before_listing` / `trading_after_delisting` / `no_lifecycle_segment`.
+- `write/load_lifecycle_manifest` (CSV) untuk kurasi manual: ekspor manifest inferensi sebagai titik awal, koreksi dengan tanggal resmi, lalu audit ulang.
 
 ## Canonical Asset Mapping
 
@@ -165,13 +175,11 @@ Momentum (skip 1 hari terakhir): `momentum_7/14/30`, `vol_adj_momentum_14/30`. R
 
 Definisi lag tetap: signal candle `t` dipakai untuk posisi periode `t -> t+1`. Tidak ada data masa depan.
 
-Konvensi timing eksplisit (timestamp = candle OPEN, `price` = close):
-signal(t) hanya boleh memakai info sampai close(t) — semua faktor bawaan
-memenuhi ini (momentum/vol memakai `shift(1)`, sisanya kontemporer-t).
-Posisi yang diputuskan di `t` dieksekusi di open berikutnya (harga = close(t),
-`execution_timestamp` selalu satu bar setelah `signal_timestamp`) dan mulai
-menghasilkan PnL pada pergerakan `t -> t+1`. Tidak ada PnL yang diakru di bar
-yang sama dengan observasi signal. Ada regression test yang mengunci perilaku ini.
+Aturan eksekusi tunggal (timestamp = candle OPEN, `price` = close) — **signal(t) dieksekusi di t+1**, dipaksakan untuk SEMUA signal tanpa kecuali:
+
+- Kolom signal yang di-ranking di-shift satu bar per aset SEBELUM smoothing/validasi/ranking, sehingga nilai yang di-ranking di bar `t` hanya memuat info sampai close(t-1) dan diisi di harga close(t).
+- Ini menutup lubang lookahead lama: signal custom/kolom default (`signal` = return kontemporer) sebelumnya terisi di close yang sama dengan bar observasinya. Faktor bawaan yang sudah self-lag membayar satu bar lag ekstra sebagai harga aturan seragam — arah yang konservatif.
+- Posisi yang diputuskan di `t` diisi di close(t) (`execution_timestamp` selalu satu bar setelah `signal_timestamp`) dan mulai menghasilkan PnL pada pergerakan `t -> t+1`. Tidak ada PnL yang diakru di bar yang informasinya menghasilkan signal. Bar pertama per aset tidak punya signal executable dan dibuang (input butuh ≥2 bar per aset, ditegakkan fail-closed). Ada regression test yang mengunci perilaku ini, termasuk devil's-advocate test bahwa spike signal di `t` baru mengubah posisi di `t+1`.
 
 ## Mesin Backtest (core)
 
@@ -191,6 +199,9 @@ yang sama dengan observasi signal. Ada regression test yang mengunci perilaku in
 - Cost stress: mode flat memakai tier absolut (4+5bps s/d 15+40bps); mode tiered memakai multiplier (`cost_x_2.00`, `cost_x_4.00`) supaya stress benar-benar berpengaruh.
 - Walk-forward: seleksi signal x n_sides x vol-target hanya dari train tiap fold; test fold beku. `state_policy` terdokumentasi (fresh deployment per fold, khusus seleksi; keputusan live memakai validasi continuous-equity).
 - Reality check: tiap baris `factor_ic` memuat `ic_tstat`, `nw_tstat` (Newey-West), bootstrap CI 95%, `adjusted_pvalue` (Bonferroni); gate `best_ic_tstat > 3.0`.
+- Deflated Sharpe Ratio (Bailey & de Prado 2014): Sharpe OOS jalur seleksi dikoreksi bias data-mining atas `n_trials` konfigurasi yang dicoba (`walk_forward.json -> data_mining`: `dsr`, `expected_sharpe_null`, varians Sharpe antar-trial). DSR < 0.95 berarti seleksi kemungkinan beruntung — alpha dibunuh. Informasional (belum hard gate); juga tampil di `deployment_decision.json` sebagai `data_mining` + gate info `dsr_above_95`.
+- Ensemble signal (`walk_forward(..., ensemble_top_k=k)`): per fold, top-k signal berbeda berdasar train Sharpe (masing-masing di n_sides/vol-target terbaiknya) dirata-bobot-sama di test segment — setara menjalankan tiap member di modal 1/k. Dilaporkan di `walk_forward.json -> ensemble` sebagai **diagnostik saja** (membership-nya sendiri hasil seleksi, jadi bukan estimasi unbiased; tidak pernah masuk vonis deployable). Best-signal walk-forward diperlakukan sebagai *candidate alpha*, bukan final alpha.
+- Capacity curve (`crypto_checker/capacity.py::capacity_curve`): backtest diulang di AUM 10k/100k/1M/10M USD; per level dilaporkan return/Sharpe/drawdown, `breach_trades`, `breached_notional`, `max_participation_ratio`, `headroom_multiple` (berapa kali lipat AUM bisa tumbuh sebelum breach pertama; <1 = sudah breach). Tanpa kolom volume → `status: no_liquidity_data` (menolak mengarang likuiditas).
 - Benchmark OOS: equal-weight basket, `btc_buy_hold`, `eth_buy_hold`, long-only equal-weight (jujur, tanpa clip), market-neutral reference. (Versi lama mem-`clip` return negatif harian ke 0 — return fabrikasi yang mustahil dicapai portfolio long-only; sudah diperbaiki.)
 - Regime dari BTC 30-hari: bull/bear/sideways x hi/lo vol, dengan cutoff vol memakai **expanding quantile** (hanya data sampai waktu itu — kuantil full-sample sebelumnya membocorkan info masa depan ke label masa lalu).
 
@@ -230,7 +241,9 @@ Opsi penting: `--signal` (kolom signal), `--signal-lookback`, `--min-signal-gap`
 
 - `summary.json`: return, Sharpe, volatilitas, max drawdown, turnover, fee, slippage, funding PnL, capacity violations.
 - `validation.json`: performa train/val/OOS (continuous), violations, cost stress, benchmark, regime, gates, `deployable`.
-- `walk_forward/walk_forward.json`: pilihan per fold, return agregat, stress, gates.
+- `walk_forward/walk_forward.json`: pilihan per fold, return agregat, stress, gates, `data_mining` (DSR), `ensemble` (bila diminta).
+- `capacity_curve.json` (bila dijalankan): kelayakan strategi per level AUM.
+- `lifecycle_manifest.csv` (via `write_lifecycle_manifest`): segmen universe untuk kurasi manual.
 - `analysis_summary.json` (analyze_midcap): mode, manifest, forced exits, status spread.
 
 ## Arti DEPLOYABLE
