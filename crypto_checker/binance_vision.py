@@ -6,7 +6,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from zipfile import ZipFile
 import pandas as pd
-from .assets import canonical_asset
+from .assets import canonical_asset, classify_funding_gaps
 
 
 SPOT_URL = "https://data.binance.vision/data/spot/daily/klines/{symbol}/{interval}/{symbol}-{interval}-{date}.zip"
@@ -15,6 +15,53 @@ FUNDING_MONTHLY_URL = "https://data.binance.vision/data/futures/um/monthly/fundi
 FUNDING_API_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
 COLUMNS = ["open_time", "open", "high", "low", "close", "volume", "close_time", "quote_volume", "trades", "taker_base", "taker_quote", "ignore"]
 VALID_INTERVALS = ("1d", "4h", "1h")
+
+# Missing-funding reasons that must NOT stop a download: the asset simply
+# had no funding to fetch (not listed yet, delisted, or inside a migration
+# window). Anything else ("active") means a tradable asset lacks funding
+# data and must raise. No reason ever causes a silent funding_rate = 0.0
+# fallback in the downloader output.
+EXPECTED_FUNDING_GAP_REASONS = ("not_listed", "delisted", "migration")
+
+
+def partition_missing_funding(result):
+    """Split missing-funding rows into (expected, unexpected).
+
+    Pure function (no network, no filesystem): classifies every price row
+    without funding via classify_funding_gaps. Returns two DataFrames with
+    columns timestamp, asset, reason.
+    """
+    gaps = classify_funding_gaps(result)
+    if gaps.empty:
+        return gaps, gaps
+    expected = gaps[gaps["reason"].isin(EXPECTED_FUNDING_GAP_REASONS)].copy()
+    unexpected = gaps[~gaps["reason"].isin(EXPECTED_FUNDING_GAP_REASONS)].copy()
+    return expected, unexpected
+
+
+def _expected_missing_manifest_path(output):
+    """Resolve reports/funding_expected_missing.csv.
+
+    Prefers a `reports/` directory next to the output's parent (the
+    conventional <repo>/data/<file> layout); falls back to the output
+    directory itself so the manifest is never silently dropped.
+    """
+    out = Path(output)
+    candidate = out.parent.parent / "reports"
+    base = candidate if candidate.is_dir() else out.parent
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "funding_expected_missing.csv"
+
+
+def _write_expected_funding_manifest(expected, output):
+    """Persist expected-missing rows; returns the manifest path."""
+    manifest = expected.copy()
+    manifest["timestamp"] = manifest["timestamp"].astype(str)
+    manifest["dataset"] = Path(output).stem
+    manifest = manifest[["dataset", "timestamp", "asset", "reason"]]
+    path = _expected_missing_manifest_path(output)
+    manifest.to_csv(path, index=False)
+    return path
 
 
 def download_binance_daily(symbols, start, end, output, futures=True, interval="1d"):
@@ -133,11 +180,16 @@ def download_binance_daily(symbols, start, end, output, futures=True, interval="
                 month_frame["asset"] = canonical_asset(symbol)
                 funding.append(month_frame)
         if missing_funding:
+            # A missing archive month is not fatal by itself: it may simply
+            # mean the symbol was not listed / already delisted / migrating
+            # that month. Save the manifests and let the row-level
+            # classification below decide (expected -> warn + continue,
+            # unexpected/active -> raise). Never fill funding with 0.0 here.
             missing_frame = pd.DataFrame(missing_funding, columns=["asset", "month"])
             Path(output).parent.mkdir(parents=True, exist_ok=True)
             result.to_csv(Path(output).with_name(Path(output).stem + "_partial.csv"), index=False)
             missing_frame.to_csv(Path(output).with_name(Path(output).stem + "_missing_funding.csv"), index=False)
-            raise RuntimeError(f"Funding archives missing for {missing_funding}; partial klines and missing-funding manifest saved beside output; refusing invalid final dataset")
+            print(f"WARNING {len(missing_funding)} symbol-months have no funding archive/API data; continuing to row-level classification", flush=True)
         if funding:
             funding_frame = pd.concat(funding, ignore_index=True)
             if interval == "1d":
@@ -170,10 +222,17 @@ def download_binance_daily(symbols, start, end, output, futures=True, interval="
         missing_rows = result[result["funding_rate"].isna()][["timestamp", "asset"]].copy()
         print(f"FUNDING_ROWS {int(funding_frame.funding_rate.notna().sum())} COVERAGE {coverage}", flush=True)
         if not missing_rows.empty:
-            Path(output).parent.mkdir(parents=True, exist_ok=True)
-            result.to_csv(Path(output).with_name(Path(output).stem + "_partial.csv"), index=False)
-            missing_rows.to_csv(Path(output).with_name(Path(output).stem + "_missing_funding_rows.csv"), index=False)
-            raise RuntimeError(f"Funding coverage incomplete: {len(missing_rows)} price rows have no funding; partial dataset and gap manifest saved; refusing zero funding fallback")
+            expected, unexpected = partition_missing_funding(result)
+            if not expected.empty:
+                manifest_path = _write_expected_funding_manifest(expected, output)
+                by_reason = expected["reason"].value_counts().to_dict()
+                print(f"WARNING {len(expected)} missing-funding rows are expected {by_reason}; manifest saved to {manifest_path}; continuing without zero funding fallback", flush=True)
+            if not unexpected.empty:
+                Path(output).parent.mkdir(parents=True, exist_ok=True)
+                result.to_csv(Path(output).with_name(Path(output).stem + "_partial.csv"), index=False)
+                unexpected[["timestamp", "asset"]].astype(str).to_csv(Path(output).with_name(Path(output).stem + "_missing_funding_rows.csv"), index=False)
+                sample = unexpected[["timestamp", "asset", "reason"]].astype(str).head(10).to_dict("records")
+                raise RuntimeError(f"Funding coverage incomplete: {len(unexpected)} price rows of actively-traded assets have no funding {sample}; partial dataset and gap manifest saved beside output; refusing zero funding fallback")
     if failures:
         print(f"FAILED_FILES {len(failures)}", flush=True)
     result = result.dropna(subset=["signal"])

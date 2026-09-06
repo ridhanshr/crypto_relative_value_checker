@@ -621,3 +621,55 @@ def test_signal_executes_next_bar_with_documented_timing():
     pos = result["positions"]
     first = pos[pos.timestamp == pos.timestamp.min()].iloc[0]
     assert first["execution_timestamp"] > first["signal_timestamp"]
+
+
+def _funding_gap_frame():
+    # A: funding starts 2024-01-10, price rows from 2024-01-01 -> not_listed head.
+    # B: funding ends 2024-01-10, price rows through 2024-01-20 -> delisted tail.
+    # C: funding throughout except 2024-01-10 with price+volume -> active.
+    # GUSDT: NaN on 2024-07-20 inside GAL->G migration window -> migration.
+    rows = []
+    for d in range(1, 21):
+        ts = f"2024-01-{d:02d}"
+        rows.append([ts, "A", 100 + d, 1000 + d, 0.01 if d >= 10 else float("nan")])
+        rows.append([ts, "B", 200 - d, 2000 + d, 0.02 if d <= 10 else float("nan")])
+        rows.append([ts, "C", 300 + d, 3000 + d, float("nan") if d == 10 else 0.03])
+    for d, rate in [(18, 0.01), (20, float("nan")), (25, 0.01)]:
+        rows.append([f"2024-07-{d:02d}", "GUSDT", 0.04, 5000.0, rate])
+    return pd.DataFrame(rows, columns=["timestamp", "asset", "price", "volume", "funding_rate"])
+
+
+def test_partition_missing_funding_splits_expected_vs_unexpected():
+    from crypto_checker.binance_vision import partition_missing_funding
+    expected, unexpected = partition_missing_funding(_funding_gap_frame())
+    assert set(expected["reason"].unique()) <= {"not_listed", "delisted", "migration"}
+    assert set(unexpected["reason"].unique()) == {"active"}
+    # A head (9 rows), B tail (10 rows), GUSDT migration window (1 row).
+    assert (expected["reason"] == "not_listed").sum() == 9
+    assert (expected["reason"] == "delisted").sum() == 10
+    assert (expected["reason"] == "migration").sum() == 1
+    assert len(unexpected) == 1 and unexpected.iloc[0]["asset"] == "C"
+
+
+def test_partition_missing_funding_empty_when_complete():
+    from crypto_checker.binance_vision import partition_missing_funding
+    data = pd.DataFrame([
+        ["2024-01-01", "A", 100, 1000.0, 0.01], ["2024-01-02", "A", 101, 1100.0, 0.02],
+    ], columns=["timestamp", "asset", "price", "volume", "funding_rate"])
+    expected, unexpected = partition_missing_funding(data)
+    assert expected.empty and unexpected.empty
+    assert list(expected.columns) == ["timestamp", "asset", "reason"]
+
+
+def test_expected_funding_manifest_written_next_to_reports(tmp_path):
+    from crypto_checker.binance_vision import _write_expected_funding_manifest, partition_missing_funding
+    expected, _ = partition_missing_funding(_funding_gap_frame())
+    out = tmp_path / "data" / "midcap.csv"
+    out.parent.mkdir(parents=True)
+    path = _write_expected_funding_manifest(expected, str(out))
+    # No reports/ sibling here -> falls back to the output directory.
+    assert path == out.parent / "funding_expected_missing.csv"
+    saved = pd.read_csv(path)
+    assert list(saved.columns) == ["dataset", "timestamp", "asset", "reason"]
+    assert (saved["dataset"] == "midcap").all()
+    assert len(saved) == len(expected)
