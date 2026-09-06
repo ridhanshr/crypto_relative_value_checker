@@ -1,0 +1,49 @@
+{
+  "ranking": [
+    {
+      "timestamp": "2024-01-07 00:00:00+00:00",
+      "long_assets": "ETHUSDT,SOLUSDT",
+      "short_assets": "BTCUSDT,XRPUSDT",
+      "long_count": 2,
+      "short_count": 2,
+      "rank_overlap": 0
+    }
+  ],
+  "exposure": [
+    {
+      "timestamp": "2024-01-07 00:00:00+00:00",
+      "long_exposure": 1.0,
+      "short_exposure": 1.0,
+      "gross_exposure": 2.0,
+      "net_exposure": 0.0
+    }
+  ],
+  "turnover": [
+    {
+      "timestamp": "2024-01-07 00:00:00+00:00",
+      "turnover": 0.0
+    }
+  ],
+  "trades": [
+    {
+      "timestamp": "2024-01-07 00:00:00+00:00",
+      "asset": "XRPUSDT",
+      "weight_change": 0.0,
+      "notional": 0.0
+    }
+  ],
+  "pnl": [
+    {
+      "timestamp": "2024-01-07 00:00:00+00:00",
+      "price_pnl": -1203.3233849270953,
+      "funding_pnl": 0.0,
+      "fee_cost": 0.0,
+      "slippage_cost": 0.0,
+      "total_pnl": -1203.3233849270953,
+      "equity": 94891.44024352028,
+      "return": -0.012522257607914757,
+      "turnover": 0.0
+    }
+  ],
+  "violations": []
+}
