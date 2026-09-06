@@ -19,7 +19,7 @@ Sistem menghitung:
 - Performa per rezim market (bull/bear/sideways x high/low vol).
 - Benchmark: equal-weight, BTC, ETH, long-only, market-neutral reference.
 
-Sistem **tidak menjamin profit**. `DEPLOYABLE=True` hanya muncul jika seluruh pemeriksaan dan validasi berhasil. Jangan pernah melonggarkan gate agar hasil menjadi `True`.
+Sistem **tidak menjamin profit**. `DEPLOYABLE=True` hanya muncul jika 5 hard gate lolos (`wf_positive`, `oos_positive`, `no_risk_violations`, `no_capacity_violations`, `reality_check_pass`). Jangan pernah melonggarkan gate agar hasil menjadi `True`.
 
 ## Flow Visual
 
@@ -80,7 +80,7 @@ scripts/
   download_binance_sample.py
   analyze_midcap.py  # pipeline analisis midcap end-to-end (preflight, spread, signal, WF)
 tests/
-  test_core.py       # 33 regression test
+  test_core.py       # 50 regression test
 ```
 
 ## Instalasi
@@ -112,6 +112,8 @@ python scripts\download_midcap.py ^
 ```
 
 Interval yang didukung: `1d`, `4h`, `1h`. Untuk `1h`/`4h`, funding di-merge per candle tepat (event funding 8-jam-an menempel pada candle-nya); untuk `1d`, funding harian dijumlah dari 3 settlement. Guard lookahead menolak event yang settle setelah candle close.
+
+Semua annualisasi (Sharpe, volatilitas, annualized return, vol-targeting) memakai `periods_per_year` yang diinferensi dari spasi timestamp — daily→365.0 persis, 4h→2190.0, 1h→8760.0 (bisa dioverride via `CheckerConfig(periods_per_year=...)`, tercatat di tiap ringkasan sebagai `periods_per_year`). Window walk-forward (`min_train_days`/`test_days`) otomatis diskala ke jumlah periode agar artinya tetap "hari" di semua interval.
 
 Aturan funding downloader (fail-closed):
 
@@ -163,6 +165,14 @@ Momentum (skip 1 hari terakhir): `momentum_7/14/30`, `vol_adj_momentum_14/30`. R
 
 Definisi lag tetap: signal candle `t` dipakai untuk posisi periode `t -> t+1`. Tidak ada data masa depan.
 
+Konvensi timing eksplisit (timestamp = candle OPEN, `price` = close):
+signal(t) hanya boleh memakai info sampai close(t) — semua faktor bawaan
+memenuhi ini (momentum/vol memakai `shift(1)`, sisanya kontemporer-t).
+Posisi yang diputuskan di `t` dieksekusi di open berikutnya (harga = close(t),
+`execution_timestamp` selalu satu bar setelah `signal_timestamp`) dan mulai
+menghasilkan PnL pada pergerakan `t -> t+1`. Tidak ada PnL yang diakru di bar
+yang sama dengan observasi signal. Ada regression test yang mengunci perilaku ini.
+
 ## Mesin Backtest (core)
 
 - Ranking cross-sectional long top / short bottom, equal weight, gross default 2.0 / net 0.0.
@@ -172,7 +182,7 @@ Definisi lag tetap: signal candle `t` dipakai untuk posisi periode `t -> t+1`. T
 - Capacity: order di atas `quote_volume x max_volume_participation` dicatat sebagai violation `capacity_limit` (masuk `capacity.csv` + gate). Baris dengan volume invalid dicatat `invalid_liquidity` dan asetnya tidak bisa dipegang.
 - Delisting: default `delist_mode="error"` (hard fail bila harga posisi hilang); `"forced_exit"` menutup posisi di harga terakhir (PnL periode terakhir 0, exit tetap kena biaya) dan mencatatnya — dipakai analisis eksplorasi midcap.
 - Funding: long membayar bila funding positif (`funding_positive_paid_by_long`, bisa dibalik untuk eksperimen); `require_funding=True` menolak input tanpa kolom funding.
-- Risk limit: `daily_loss_limit`, `max_drawdown_limit` (diukur dari equity awal, konsisten dengan metrik akhir); `--enforce-risk-limits` menghentikan run saat breach (mode produksi).
+- Risk limit: `daily_loss_limit`, `max_drawdown_limit` diukur dari **running peak** intra-loop (peak diupdate tiap bar, jadi drawdown puncak-ke-lembah yang sebenarnya memicu violation, bukan cuma rugi-dari-awal); `--enforce-risk-limits` menghentikan run saat breach (mode produksi).
 - Drawdown metrik dihitung dari equity awal (bukan dari equity berjalan), supaya konsisten dengan tracking intra-loop.
 
 ## Validation, Walk-Forward, Reality Check
@@ -181,8 +191,8 @@ Definisi lag tetap: signal candle `t` dipakai untuk posisi periode `t -> t+1`. T
 - Cost stress: mode flat memakai tier absolut (4+5bps s/d 15+40bps); mode tiered memakai multiplier (`cost_x_2.00`, `cost_x_4.00`) supaya stress benar-benar berpengaruh.
 - Walk-forward: seleksi signal x n_sides x vol-target hanya dari train tiap fold; test fold beku. `state_policy` terdokumentasi (fresh deployment per fold, khusus seleksi; keputusan live memakai validasi continuous-equity).
 - Reality check: tiap baris `factor_ic` memuat `ic_tstat`, `nw_tstat` (Newey-West), bootstrap CI 95%, `adjusted_pvalue` (Bonferroni); gate `best_ic_tstat > 3.0`.
-- Benchmark OOS: equal-weight, BTC, ETH, long-only equal-weight, market-neutral reference.
-- Regime dari BTC 30-hari: bull/bear/sideways x hi/lo vol.
+- Benchmark OOS: equal-weight basket, `btc_buy_hold`, `eth_buy_hold`, long-only equal-weight (jujur, tanpa clip), market-neutral reference. (Versi lama mem-`clip` return negatif harian ke 0 — return fabrikasi yang mustahil dicapai portfolio long-only; sudah diperbaiki.)
+- Regime dari BTC 30-hari: bull/bear/sideways x hi/lo vol, dengan cutoff vol memakai **expanding quantile** (hanya data sampai waktu itu — kuantil full-sample sebelumnya membocorkan info masa depan ke label masa lalu).
 
 ## Spread Check
 
@@ -225,7 +235,7 @@ Opsi penting: `--signal` (kolom signal), `--signal-lookback`, `--min-signal-gap`
 
 ## Arti DEPLOYABLE
 
-`DEPLOYABLE=True` berarti lolos semua gate, **bukan** jaminan profit: train/val/OOS positif, Sharpe OOS > 1, drawdown > -20%, semua cost stress positif, nol risk/capacity violation, funding 100%, spread lolos, IC lolos multiple-testing. Satu saja gagal -> `DEPLOYABLE False`.
+`DEPLOYABLE=True` berarti lolos semua gate, **bukan** jaminan profit. Vonis hanya memakai 5 hard gate — `wf_positive`, `oos_positive`, `no_risk_violations`, `no_capacity_violations`, `reality_check_pass` (IC terbaik lolos koreksi multiple-testing) — gate lain informasional. Satu hard gate gagal -> `DEPLOYABLE False`.
 
 ## Batasan
 
