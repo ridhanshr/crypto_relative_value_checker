@@ -33,6 +33,8 @@ class CheckerConfig:
     delist_mode: str = "error"
     max_volume_participation: float = 0.05
     cost_multiplier: float = 1.0
+    slippage_mode: str = "tier"
+    spread_csv: str = ""
 
 
 def _validate(data, signal_column):
@@ -57,6 +59,30 @@ def _validate(data, signal_column):
     return data.sort_values(["timestamp", "asset"]).reset_index(drop=True)
 
 
+_SPREAD_CACHE = {}
+
+
+def _load_spread_map(spread_csv):
+    key = str(Path(spread_csv).resolve())
+    try:
+        mtime = Path(spread_csv).stat().st_mtime
+    except OSError as exc:
+        raise ValueError(f"spread_csv not readable: {spread_csv}") from exc
+    cached = _SPREAD_CACHE.get(key)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    frame = pd.read_csv(spread_csv)
+    missing = {"asset", "spread_bps"} - set(frame.columns)
+    if missing:
+        raise ValueError(f"Spread CSV missing columns: {sorted(missing)}")
+    spread = pd.to_numeric(frame["spread_bps"], errors="coerce")
+    if spread.isna().any() or (spread < 0).any():
+        raise ValueError("Spread CSV has non-numeric or negative spread_bps")
+    spread_map = dict(zip(frame["asset"].astype(str), (spread / 10000.0).tolist()))
+    _SPREAD_CACHE[key] = (mtime, spread_map)
+    return spread_map
+
+
 def _assign_liquidity_tier_rates(data, cfg):
     liq = pd.to_numeric(data[cfg.liquidity_column], errors="coerce")
     data["_liq_score"] = liq.groupby(data["asset"]).transform(lambda s: s.rolling(cfg.liquidity_lookback, min_periods=1).mean().shift(1))
@@ -65,6 +91,12 @@ def _assign_liquidity_tier_rates(data, cfg):
     most_illiquid = cfg.liquidity_tiers[-1]
     data["_fee_rate"] = np.select(conds, [t[1] for t in cfg.liquidity_tiers], default=most_illiquid[1])
     data["_slip_rate"] = np.select(conds, [t[2] for t in cfg.liquidity_tiers], default=most_illiquid[2])
+    if cfg.slippage_mode == "spread":
+        if not cfg.spread_csv:
+            raise ValueError("slippage_mode='spread' requires spread_csv")
+        spread_map = _load_spread_map(cfg.spread_csv)
+        quoted = data["asset"].astype(str).map(spread_map)
+        data["_slip_rate"] = np.maximum(data["_slip_rate"].to_numpy(), quoted.fillna(data["_slip_rate"]).to_numpy())
     return data
 
 
@@ -79,7 +111,7 @@ def check_strategy(data, config=None):
     if cfg.signal_lookback > 1:
         data[cfg.signal_column] = data.groupby("asset")[cfg.signal_column].transform(lambda x: x.rolling(cfg.signal_lookback, min_periods=cfg.signal_lookback).mean())
         data = data.dropna(subset=[cfg.signal_column]).reset_index(drop=True)
-    if cfg.n_long < 1 or cfg.n_short < 1 or cfg.initial_equity <= 0 or cfg.gross_exposure <= 0 or cfg.fee_rate < 0 or cfg.slippage_rate < 0 or cfg.signal_lookback < 1 or cfg.min_signal_gap < 0 or cfg.rebalance_every < 1 or not 0 < cfg.max_drawdown_limit < 1 or not 0 < cfg.daily_loss_limit < 1 or cfg.vol_target_annual < 0 or cfg.vol_lookback < 2 or not 0 < cfg.vol_warmup_scale <= 1 or cfg.liquidity_lookback < 1 or not 0 < cfg.max_volume_participation <= 1 or cfg.cost_multiplier < 0 or cfg.delist_mode not in ("error", "forced_exit"):
+    if cfg.n_long < 1 or cfg.n_short < 1 or cfg.initial_equity <= 0 or cfg.gross_exposure <= 0 or cfg.fee_rate < 0 or cfg.slippage_rate < 0 or cfg.signal_lookback < 1 or cfg.min_signal_gap < 0 or cfg.rebalance_every < 1 or not 0 < cfg.max_drawdown_limit < 1 or not 0 < cfg.daily_loss_limit < 1 or cfg.vol_target_annual < 0 or cfg.vol_lookback < 2 or not 0 < cfg.vol_warmup_scale <= 1 or cfg.liquidity_lookback < 1 or not 0 < cfg.max_volume_participation <= 1 or cfg.cost_multiplier < 0 or cfg.delist_mode not in ("error", "forced_exit") or cfg.slippage_mode not in ("tier", "spread"):
         raise ValueError("Invalid checker configuration")
     if cfg.liquidity_tiers:
         thresholds = [t[0] for t in cfg.liquidity_tiers]

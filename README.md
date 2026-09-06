@@ -190,7 +190,7 @@ Definisi lag tetap: signal candle `t` dipakai untuk posisi periode `t -> t+1`. T
 python -c "from crypto_checker.spread_check import check_order_book_spread; check_order_book_spread(['BTCUSDT','INJUSDT'], output='data/spread.csv')"
 ```
 
-Mengukur spread bid-ask riil (bps) dan menyimpan CSV. Hasil terukur (snapshot): median ~2.3 bps, maks ~16 bps (DYDX saat volatil); tier bawah midcap (15+40 bps) konservatif ~11x di atas median spread tier bawah. Catatan: snapshot kondisi tenang — stress 2x/4x menutupi pelebaran saat krisis. Simbol hilang dari bookTicker (mis. delisted) dilaporkan eksplisit. Jika API tidak terjangkau, hasil `SPREAD_CHECK_UNAVAILABLE` dan analisis otomatis turun ke mode eksplorasi (tidak deployable).
+Mengukur spread bid-ask riil (bps) dan menyimpan CSV. Hasil terukur (snapshot): median ~2.3 bps, maks ~16 bps (DYDX saat volatil); tier bawah midcap (5+40 bps) konservatif ~11x di atas median spread tier bawah. Catatan: snapshot kondisi tenang — stress 2x/4x menutupi pelebaran saat krisis. Mode `slippage-mode="spread"` memakai `max(full spread terukur, floor tier)` per aset (fail-closed bila file hilang); flag `--spread-csv` menunjuk ke file spread. Simbol hilang dari bookTicker (mis. delisted) dilaporkan eksplisit. Jika API tidak terjangkau, hasil `SPREAD_CHECK_UNAVAILABLE` dan analisis otomatis turun ke mode eksplorasi (tidak deployable).
 
 ## Analisis Midcap End-to-End
 
@@ -214,7 +214,7 @@ python -m crypto_checker.cli ^
   --liquidity-column quote_volume --cost-preset midcap
 ```
 
-Opsi penting: `--signal` (kolom signal), `--signal-lookback`, `--min-signal-gap`, `--enforce-risk-limits`, `--liquidity-column`, `--cost-preset {liquid,midcap}`, `--research` (pipeline riset penuh + deployment decision), `--skip-walk-forward`.
+Opsi penting: `--signal` (kolom signal), `--signal-lookback`, `--min-signal-gap`, `--enforce-risk-limits`, `--liquidity-column`, `--cost-preset {liquid,midcap}`, `--slippage-mode {tier,spread}`, `--spread-csv` (wajib bila mode spread), `--research` (pipeline riset penuh + deployment decision), `--skip-walk-forward`. Tier midcap: fee 5 bps flat + slippage 5/10/20/40 bps per persentil volume; tiap segmen validasi menandai `turnover_flag: OVER` bila turnover rata-rata >0,15/hari.
 
 ## Membaca Hasil
 

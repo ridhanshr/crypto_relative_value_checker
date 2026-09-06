@@ -376,3 +376,69 @@ def test_repair_migration_cutover_uses_calendar_date():
     assert row.price == pytest.approx(0.03975)
     legacy = repaired[repaired.timestamp == "2025-09-30"].iloc[0]
     assert legacy.price == pytest.approx(4.275 / 75)
+
+
+def _spread_frame(tmp_path):
+    import csv
+    path = tmp_path / "sp.csv"
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["asset", "spread_bps"])
+        writer.writerow(["A", 100.0])
+        writer.writerow(["B", 2.0])
+    return str(path)
+
+
+def test_spread_calibrated_slippage_uses_max_of_spread_and_floor(tmp_path):
+    dates = [f"2026-01-{d:02d}" for d in range(1, 4)]
+    rows = []
+    for d, ts in enumerate(dates, start=1):
+        top = 4 if d % 2 else -4
+        rows.append([ts, "A", 100, top, 1_000_000.0])
+        rows.append([ts, "B", 100, -top, 100.0])
+    data = pd.DataFrame(rows, columns=["timestamp", "asset", "price", "signal", "quote_volume"])
+    tiers = ((0.0, 0.0005, 0.0005),)
+    result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0.0005, slippage_rate=0.0005, liquidity_column="quote_volume", liquidity_tiers=tiers, slippage_mode="spread", spread_csv=_spread_frame(tmp_path)))
+    assert result["pnl"].iloc[0].slippage_cost == pytest.approx(100_000 * 0.01 + 100_000 * 0.0005)
+
+
+def test_spread_mode_falls_back_to_floor_for_missing_asset(tmp_path):
+    import csv
+    path = tmp_path / "sp.csv"
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["asset", "spread_bps"])
+        writer.writerow(["A", 100.0])
+    dates = [f"2026-01-{d:02d}" for d in range(1, 4)]
+    rows = []
+    for d, ts in enumerate(dates, start=1):
+        top = 4 if d % 2 else -4
+        rows.append([ts, "A", 100, top, 1_000_000.0])
+        rows.append([ts, "B", 100, -top, 100.0])
+    data = pd.DataFrame(rows, columns=["timestamp", "asset", "price", "signal", "quote_volume"])
+    tiers = ((0.0, 0.0005, 0.0005),)
+    result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0.0005, slippage_rate=0.0005, liquidity_column="quote_volume", liquidity_tiers=tiers, slippage_mode="spread", spread_csv=str(path)))
+    assert result["pnl"].iloc[0].slippage_cost == pytest.approx(100_000 * 0.01 + 100_000 * 0.0005)
+    with pytest.raises(ValueError, match="spread_csv"):
+        check_strategy(data, CheckerConfig(n_long=1, n_short=1, liquidity_column="quote_volume", liquidity_tiers=tiers, slippage_mode="spread", spread_csv=str(tmp_path / "missing.csv")))
+
+
+def test_turnover_flag_marks_over_threshold_segments():
+    from crypto_checker.validation import _segment_metrics
+    dates = pd.date_range("2026-01-01", periods=10, freq="D", tz="UTC")
+    pnl = pd.DataFrame({"timestamp": dates, "equity": 100_000 + np.arange(10) * 10.0, "return": [0.001] * 10, "turnover": [0.20] * 10})
+    out = _segment_metrics(pnl, pd.DataFrame(), list(dates), 100_000.0)
+    assert out["turnover_flag"] == "OVER"
+    pnl2 = pnl.copy()
+    pnl2["turnover"] = 0.01
+    out2 = _segment_metrics(pnl2, pd.DataFrame(), list(dates), 100_000.0)
+    assert out2["turnover_flag"] == "OK"
+
+
+def test_invalid_slippage_mode_rejected():
+    data = pd.DataFrame([
+        ["2026-01-01", "A", 100, 2], ["2026-01-01", "B", 100, 1],
+        ["2026-01-02", "A", 100, 2], ["2026-01-02", "B", 100, 1],
+    ], columns=["timestamp", "asset", "price", "signal"])
+    with pytest.raises(ValueError):
+        check_strategy(data, CheckerConfig(n_long=1, n_short=1, slippage_mode="bogus"))

@@ -145,8 +145,17 @@ def download_binance_daily(symbols, start, end, output, futures=True, interval="
                 if not (funding_frame["timestamp"] < funding_frame["date"] + pd.Timedelta(days=1)).all():
                     raise RuntimeError("Funding event settled after candle close; refusing lookahead merge")
                 per_day = funding_frame.groupby(["date", "asset"]).size()
-                if (per_day > 3).any():
-                    raise RuntimeError("More than 3 funding settlements in one UTC day; funding alignment invalid")
+                freq_report = (
+                    funding_frame.assign(date=funding_frame["date"])
+                    .groupby("asset")["date"]
+                    .apply(lambda s: s.value_counts().max())
+                    .rename("max_settlements_per_day")
+                )
+                print("max settlements/day per asset (values >3 mean sub-8h funding interval, aggregated by sum):", flush=True)
+                over = freq_report[freq_report > 3]
+                if not over.empty:
+                    print(over.to_string(), flush=True)
+                freq_report.to_csv(Path(output).with_name(Path(output).stem + "_funding_frequency.csv"))
                 result["date"] = result["timestamp"].dt.floor("D")
                 funding_frame = funding_frame.groupby(["date", "asset"], as_index=False)["funding_rate"].sum()
                 result = result.merge(funding_frame, on=["date", "asset"], how="left")
