@@ -693,3 +693,27 @@ def test_expected_funding_manifest_written_next_to_reports(tmp_path):
     assert list(saved.columns) == ["dataset", "timestamp", "asset", "reason"]
     assert (saved["dataset"] == "midcap").all()
     assert len(saved) == len(expected)
+
+
+def test_funding_frequency_report_aggregates_sub8h_and_flags_extremes():
+    # Regression: sub-8h funding intervals (e.g. hourly prints during
+    # volatility events) must be summed per UTC day, never rejected, and
+    # the extreme daily print must be auditable from the manifest.
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from scripts.fetch_funding import build_funding_frequency_report
+    ts = pd.date_range("2026-01-01", periods=24, freq="h", tz="UTC")
+    rows = [{"timestamp": t, "asset": "X", "funding_rate": -0.004} for t in ts]
+    rows += [
+        {"timestamp": pd.Timestamp("2026-01-01 00:00", tz="UTC"), "asset": "Y", "funding_rate": 0.0001},
+        {"timestamp": pd.Timestamp("2026-01-01 08:00", tz="UTC"), "asset": "Y", "funding_rate": 0.0001},
+        {"timestamp": pd.Timestamp("2026-01-01 16:00", tz="UTC"), "asset": "Y", "funding_rate": 0.0001},
+    ]
+    funding = pd.DataFrame(rows)
+    freq_report, daily = build_funding_frequency_report(funding)
+    assert freq_report.loc["X", "max_settlements_per_day"] == 24
+    assert freq_report.loc["Y", "max_settlements_per_day"] == 3
+    assert daily[(daily.asset == "X") & (daily.date == "2026-01-01")]["funding_rate"].iloc[0] == pytest.approx(-0.096)
+    assert freq_report.loc["X", "max_abs_daily_rate"] == pytest.approx(-0.096)
+    assert str(freq_report.loc["X", "max_abs_daily_rate_date"]) == "2026-01-01 00:00:00+00:00"

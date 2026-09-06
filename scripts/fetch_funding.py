@@ -5,7 +5,9 @@
 - Rows canonicalized (OMNI->NOM, GAL->G, MATIC->POL) with migration
   cutover by official effective date (old symbol rows only before it,
   new symbol rows only on/after it) to avoid double counting.
-- Aggregated to daily sums per (date, canonical asset), max 3/day guard.
+- Aggregated to daily sums per (date, canonical asset) regardless of
+  settlement count (8h/4h/1h intervals all occur); per-asset max
+  settlements/day plus max |daily rate| go to the frequency manifest.
 - Merges into klines on (date, asset); rows without funding stay NaN
   (preflight --require-funding will catch them loudly).
 
@@ -23,6 +25,7 @@ from urllib.request import urlopen
 from urllib.parse import urlencode
 from zipfile import ZipFile
 
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -30,6 +33,43 @@ from crypto_checker.assets import canonical_asset, MIGRATION_METADATA
 from crypto_checker.binance_vision import FUNDING_MONTHLY_URL, FUNDING_API_URL
 
 LEGACY_SYMBOLS = ["MATICUSDT", "GALUSDT", "OMNIUSDT"]
+
+
+def build_funding_frequency_report(funding):
+    """Aggregate funding events to daily sums + audit manifest.
+
+    funding: event-level DataFrame with timestamp/asset/funding_rate.
+    Returns (freq_report, daily) where freq_report is indexed by asset with
+    max_settlements_per_day plus max_abs_daily_rate(_date), and daily holds
+    per-(date, asset) sums. Sub-8h intervals are aggregated, never rejected.
+    """
+    frame = funding.copy()
+    frame["date"] = pd.to_datetime(frame["timestamp"], utc=True).dt.floor("D")
+    freq_report = (
+        frame.groupby("asset")["date"]
+        .apply(lambda s: s.value_counts().max())
+        .rename("max_settlements_per_day")
+        .to_frame()
+    )
+
+    def _extreme_idx(s):
+        s = s.dropna()
+        return s.abs().idxmax() if len(s) else np.nan
+
+    daily = frame.groupby(["date", "asset"], as_index=False)["funding_rate"].sum()
+    # Extreme-value audit: max |daily aggregated rate| per asset and when it
+    # occurred. Large prints (e.g. API3USDT -10% on 2025-08-19 from hourly
+    # settlements incl. a -2% cap print) are genuine Binance data, but they
+    # dominate PnL attribution and must be auditable from the manifest alone.
+    extreme_idx = daily.groupby("asset")["funding_rate"].apply(_extreme_idx).dropna()
+    if len(extreme_idx):
+        extreme = daily.loc[extreme_idx.values, ["asset", "date", "funding_rate"]].rename(
+            columns={"date": "max_abs_daily_rate_date", "funding_rate": "max_abs_daily_rate"})
+        freq_report = freq_report.merge(extreme.set_index("asset"), left_index=True, right_index=True, how="left")
+    else:
+        freq_report["max_abs_daily_rate_date"] = pd.NaT
+        freq_report["max_abs_daily_rate"] = np.nan
+    return freq_report, daily
 
 
 def fetch_funding_archive(url):
@@ -175,16 +215,9 @@ def main():
     funding["date"] = funding["timestamp"].dt.floor("D")
     if not (funding["timestamp"] < funding["date"] + pd.Timedelta(days=1)).all():
         raise RuntimeError("Funding event settled after candle close; refusing lookahead merge")
-    per_day = funding.groupby(["date", "asset"]).size()
-    freq_report = (
-        funding.assign(date=funding["date"])
-        .groupby("asset")["date"]
-        .apply(lambda s: s.value_counts().max())
-        .rename("max_settlements_per_day")
-    )
+    freq_report, daily = build_funding_frequency_report(funding)
     print("max settlements/day per asset (values >3 mean sub-8h funding interval, aggregated by sum):", flush=True)
-    print(freq_report[freq_report > 3].to_string(), flush=True)
-    daily = funding.groupby(["date", "asset"], as_index=False)["funding_rate"].sum()
+    print(freq_report[freq_report["max_settlements_per_day"] > 3].to_string(), flush=True)
     freq_report.to_csv(out.parent / (out.stem + "_funding_frequency.csv"))
 
     if "funding_rate" in klines.columns:
