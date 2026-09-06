@@ -243,3 +243,82 @@ def classify_timestamp_gaps(data, expected_frequency="D", adjacency_days=7):
                 reason = "unexplained_interior"
             rows.append({"asset": canonical, "gap_start": start, "gap_end": end, "gap_days": days, "reason": reason})
     return pd.DataFrame(rows, columns=cols)
+
+
+def lifecycle_from_listing_manifest(manifest):
+    """Adapt a historical listing manifest into lifecycle segments.
+
+    Input columns: symbol, listed_at, delisted_at (None/NaT = still live).
+    Symbols are canonicalized (GALUSDT + GUSDT -> one GUSDT canonical with
+    two segments), so the manifest plugs straight into
+    ``audit_universe_compliance`` and ``active_assets``. Segment sources are
+    labeled ``listing_manifest:<source>`` to preserve the inferred/official
+    distinction of the manifest itself.
+    """
+    frame = pd.DataFrame(manifest).copy()
+    missing = [c for c in ("symbol", "listed_at") if c not in frame.columns]
+    if missing:
+        raise ValueError(f"Listing manifest missing columns: {missing}")
+    if "delisted_at" not in frame.columns:
+        frame["delisted_at"] = pd.NaT
+    if "source" not in frame.columns:
+        frame["source"] = "unknown"
+    frame["listed_at"] = pd.to_datetime(frame["listed_at"], utc=True, errors="coerce")
+    frame["delisted_at"] = pd.to_datetime(frame["delisted_at"], utc=True, errors="coerce")
+    if frame["listed_at"].isna().any():
+        raise ValueError("Listing manifest has unparseable listed_at values")
+    frame["canonical"] = frame["symbol"].astype(str).str.upper().map(canonical_asset)
+    rows = []
+    for _, row in frame.iterrows():
+        alive = pd.isna(row["delisted_at"])
+        rows.append({
+            "canonical": row["canonical"],
+            "symbol": str(row["symbol"]).upper(),
+            "listed_at": row["listed_at"],
+            "delisted_at": None if alive else row["delisted_at"],
+            "event": "active" if alive else "delisting",
+            "source": f"listing_manifest:{row['source']}",
+        })
+    return pd.DataFrame(rows, columns=LIFECYCLE_COLUMNS).sort_values(["canonical", "listed_at"]).reset_index(drop=True)
+
+
+def measure_survivorship_gap(data, manifest):
+    """Measure survivorship bias EXPLICITLY as a number, not a note.
+
+    Compares the dataset's canonical universe against every manifest symbol
+    whose [listed_at, delisted_at] overlaps the dataset window:
+
+    * ``missing_dead``: tradable in-window but dead/absent from the data --
+      the bias carriers (their crashes never enter the cross-section).
+    * ``missing_alive``: tradable in-window, still alive, but not in the
+      dataset -- a coverage choice, not bias (e.g. midcap scope).
+    * ``coverage_ratio``: dataset assets / manifest assets in-window.
+
+    A cross-sectional strategy picking "top volume" in-window while its
+    dataset silently drops the dead is flattered by exactly the names in
+    ``missing_dead``.
+    """
+    frame = pd.DataFrame(manifest).copy()
+    frame["listed_at"] = pd.to_datetime(frame["listed_at"], utc=True, errors="coerce")
+    frame["delisted_at"] = pd.to_datetime(frame["delisted_at"], utc=True, errors="coerce")
+    data_ts = pd.to_datetime(data["timestamp"], utc=True, errors="coerce")
+    start, end = data_ts.min(), data_ts.max()
+    have = set(data["asset"].astype(str).str.upper().map(canonical_asset).unique().tolist())
+    in_window = frame[(frame["listed_at"] <= end) & (frame["delisted_at"].isna() | (frame["delisted_at"] >= start))].copy()
+    in_window["canonical"] = in_window["symbol"].astype(str).str.upper().map(canonical_asset)
+    missing = in_window[~in_window["canonical"].isin(have)].copy()
+    dead = missing[missing["delisted_at"].notna()].copy()
+    alive = missing[missing["delisted_at"].isna()].copy()
+    universe = sorted(in_window["canonical"].unique().tolist())
+    return {
+        "window_start": str(start),
+        "window_end": str(end),
+        "n_manifest_in_window": int(len(universe)),
+        "n_dataset": int(len(have)),
+        "coverage_ratio": float(len(set(have) & set(universe)) / max(len(universe), 1)),
+        "n_missing_dead": int(dead["canonical"].nunique()),
+        "missing_dead": sorted(dead["canonical"].unique().tolist()),
+        "n_missing_alive": int(alive["canonical"].nunique()),
+        "missing_alive": sorted(alive["canonical"].unique().tolist()),
+        "note": "missing_dead carried crashes the dataset never sees; cross-sectional returns measured without them are flattered by construction",
+    }

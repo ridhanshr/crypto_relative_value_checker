@@ -77,6 +77,9 @@ turun (base −0,01 → 2× −0,20 → 4× −0,57), sesuai ekspektasi ekonomi.
 Pengukuran líve dari order book, bukan asumsi. Tier slippage midcap
 (5–40 bps) konservatif ~11× di atas median tier bawah — asumsi biaya tidak
 meremehkan kondisi normal. Caveat jujur: ini snapshot tenang, bukan stress.
+Status: liquidity crisis behaviour partially approximated via spread stress
+multipliers (2×/4×) — pelebaran spread saat panik belum diukur langsung,
+bukan blocker untuk research-grade.
 
 ### 2.6 Walk-forward bebas leakage
 
@@ -130,8 +133,7 @@ yang berubah hanya keyakinan bahwa penolakan gate bukan artefak asumsi murah.
    keyakinan statistik atas jalur itu terbatas.
 3. **Snapshot spread tunggal.** Valid untuk kalibrasi tier, belum mewakili
    pelebaran spread saat krisis (ditutup sebagian oleh stress 2×/4×).
-4. **Survivorship bias** tetap dicatat belum terukur — batasan data, bukan
-   kegagalan mesin.
+4. **Survivorship bias — kini TERUKUR eksplisit (was 🔴).** Historical listing manifest (1028 simbol futures, 459 mati; validasi silang: LUNA mati 2022-05-13, G listing 2024-08-15, POL 2024-09-13 — semua cocok sejarah) dipasang ke lifecycle + preflight. Dataset funded 47-aset vs 934 simbol in-window: **365 dead-in-window tak tercakup** (upper bound termasuk tracker non-crypto; carrier material: FTT, SRM, ALPHA, BNX, REEF, WAVES, LOOM, KDA, REN...). Kontrol negatif lolos: LUNA ter-exclude dengan benar (pre-window), GAL/MATIC ter-exclude dengan benar (suksesor di dataset). Batasan sisa: tanggal listing/delisting adalah proksi file Vision pertama/terakhir (±hari vs pengumuman resmi), dan angka 365 adalah batas atas — namun arah bias kini tak terbantahkan: cross-section tanpa nama-nama itu terflatter secara konstruksi.
 
 ## 4. Vonis
 

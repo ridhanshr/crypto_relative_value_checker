@@ -152,6 +152,7 @@ Fondasi universe construction: tiap aset canonical dipecah menjadi segmen `(symb
 - `active_assets(lifecycle, ts)` menjawab "apa yang tradable di instant t" — backtest konsisten dengan ini by construction (ranking hanya memakai aset yang hadir di bar t; tidak ada forward fill).
 - `audit_universe_compliance(data, lifecycle)` memeriksa dataset terhadap manifest **independen** (mis. yang dikurasi manual dari tanggal resmi) dan menandai `trading_before_listing` / `trading_after_delisting` / `no_lifecycle_segment`.
 - `write/load_lifecycle_manifest` (CSV) untuk kurasi manual: ekspor manifest inferensi sebagai titik awal, koreksi dengan tanggal resmi, lalu audit ulang.
+- Historical listing manifest (`scripts/build_listing_manifest.py`): enumerasi SEMUA prefix simbol futures USDT-M yang pernah ada di Binance Vision (1028 simbol, termasuk yang mati seperti LUNA/FTT/SRM yang tak lagi muncul di API) + status live via exchangeInfo → `data/historical_listing_manifest.csv` (lokal, di-ignore git). `lifecycle_from_listing_manifest` mengadaptasinya ke segmen lifecycle; `measure_survivorship_gap` mengukur bias EKSLISIT (bukan note): dataset funded 47-aset vs 934 simbol in-window → 365 dead-in-window tak tercakup (upper bound, termasuk tracker saham/ETF; contoh material: FTT, SRM, ALPHA, BNX, REEF, WAVES, LOOM). LUNA benar-benar di-exclude (mati 2022, pre-window — windowing terbukti bekerja); GAL/MATIC benar-benar di-exclude (suksesor G/POL ada di dataset — kanonikalisasi terbukti bekerja). Preflight menerima `listing_manifest=` dan menulis `survivorship_gap` + warning `SURVIVORSHIP_GAP`.
 
 ## Canonical Asset Mapping
 
@@ -266,6 +267,6 @@ Catatan: preflight atas CSV mentah melaporkan `valid: False` hanya karena kolom 
 
 - Backtest bukan jaminan profit live; hasil OOS bisa kena regime shift.
 - Universe berpotensi bias survivorship (tercatat di setiap report).
-- Snapshot spread bukan kondisi stress; slippage real-time bisa lebih besar.
+- Snapshot spread bukan kondisi stress; slippage real-time bisa lebih besar. Liquidity crisis behaviour partially approximated via spread stress multipliers (cost stress 2x/4x) — pelebaran spread saat panik belum diukur langsung.
 - Migration tanpa faktor resmi ditolak — jangan menebak rasio.
 - Paper trading 60-90 hari + kill switch + rekonsiliasi order tetap wajib sebelum modal nyata.

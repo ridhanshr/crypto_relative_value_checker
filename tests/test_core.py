@@ -929,3 +929,131 @@ def test_preflight_strict_passes_documented_halt_fails_unexplained():
     tolerant = validate_dataset(hole, min_assets=2, min_periods=2, expected_frequency="D", allow_gaps=True)
     assert tolerant["valid"]
     assert any("NOT valid for futures" in w for w in tolerant["warnings"])
+
+
+def test_stress_repeated_forced_exits_across_chaos():
+    # Behavior under stress, not one observation: B/C/D vanish on three
+    # consecutive bars while each is HELD. All three must be force-exited
+    # at last price, the run must complete, PnL must stay finite.
+    bars = {
+        "2026-01-01": {"A": 5, "B": 10, "C": 4, "D": 3, "E": 0},
+        "2026-01-02": {"A": 5, "B": 1, "C": 10, "D": 4, "E": 0},
+        "2026-01-03": {"A": 5, "C": 1, "D": 10, "E": 0},
+        "2026-01-04": {"A": 10, "D": 1, "E": 0},
+        "2026-01-05": {"A": 10, "E": 0},
+        "2026-01-06": {"A": 10, "E": 0},
+    }
+    rows = [[ts, asset, 100, sig] for ts, sigs in bars.items() for asset, sig in sigs.items()]
+    data = pd.DataFrame(rows, columns=["timestamp", "asset", "price", "signal"])
+    result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0, slippage_rate=0, delist_mode="forced_exit"))
+    exits = result["violations"][result["violations"]["type"] == "forced_exit"]
+    assert sorted(exits["asset"].tolist()) == ["B", "C", "D"]
+    assert (exits["last_price"] == 100).all()
+    for asset in ("B", "C", "D"):
+        leg = result["trades"][result["trades"]["asset"] == asset]
+        assert (leg["weight_change"] < 0).any()
+    assert np.isfinite(result["pnl"]["total_pnl"]).all()
+    assert result["metrics"]["periods"] == 4
+
+
+def test_stress_crash_then_delist_exits_at_crashed_price():
+    # 100 -> 80 (x0.8) -> 56 (x0.7) -> 47.6 (x0.85), then gone. The exit
+    # must print the crashed 47.6, never a stale 100, and the crash must
+    # be realized in drawdown (no silent carry).
+    data = pd.DataFrame([
+        ["2026-01-01", "A", 100.0, 2], ["2026-01-01", "B", 100.0, 1], ["2026-01-01", "C", 100.0, 0],
+        ["2026-01-02", "A", 80.0, 2], ["2026-01-02", "B", 100.0, 1], ["2026-01-02", "C", 100.0, 0],
+        ["2026-01-03", "A", 56.0, 2], ["2026-01-03", "B", 100.0, 1], ["2026-01-03", "C", 100.0, 0],
+        ["2026-01-04", "A", 47.6, 2], ["2026-01-04", "B", 100.0, 1], ["2026-01-04", "C", 100.0, 0],
+        ["2026-01-05", "B", 100.0, 1], ["2026-01-05", "C", 100.0, 0],
+    ], columns=["timestamp", "asset", "price", "signal"])
+    result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0, slippage_rate=0, delist_mode="forced_exit"))
+    exits = result["violations"][result["violations"]["type"] == "forced_exit"]
+    assert len(exits) == 1 and exits.iloc[0]["asset"] == "A"
+    assert exits.iloc[0]["last_price"] == pytest.approx(47.6)
+    assert result["metrics"]["max_drawdown"] < -0.30
+
+
+def test_stress_volume_collapse_triggers_capacity_breach():
+    # Volume x0.1 overnight with a simultaneous flip: rebalancing INTO the
+    # collapsed book must breach, while the same trade in the deep book
+    # (t2) stays clean. Breaches must start exactly at the collapse.
+    data = pd.DataFrame([
+        ["2026-01-01", "A", 100, 2, 10_000_000.0], ["2026-01-01", "B", 100, 1, 10_000_000.0],
+        ["2026-01-02", "A", 100, 1, 10_000_000.0], ["2026-01-02", "B", 100, 2, 10_000_000.0],
+        ["2026-01-03", "A", 100, 1, 1_000_000.0], ["2026-01-03", "B", 100, 2, 1_000_000.0],
+        ["2026-01-04", "A", 100, 1, 1_000_000.0], ["2026-01-04", "B", 100, 2, 1_000_000.0],
+    ], columns=["timestamp", "asset", "price", "signal", "quote_volume"])
+    cfg = CheckerConfig(n_long=1, n_short=1, fee_rate=0, slippage_rate=0, liquidity_column="quote_volume", liquidity_tiers=((0.0, 0.0, 0.0),))
+    result = check_strategy(data, cfg)
+    breaches = result["violations"][result["violations"]["type"] == "capacity_limit"]
+    assert len(breaches) > 0
+    assert (pd.to_datetime(breaches["timestamp"], utc=True) >= pd.Timestamp("2026-01-03", tz="UTC")).all()
+
+
+def test_stress_spread_widening_scales_crisis_costs(tmp_path):
+    # Spread panic (100 bps) vs normal (2 bps): crisis slippage must be
+    # exactly 50x on identical flow. Proves the spread channel transmits
+    # stress instead of absorbing it.
+    import csv
+    calm, panic = tmp_path / "calm.csv", tmp_path / "panic.csv"
+    for path, bps in ((calm, 2.0), (panic, 100.0)):
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["asset", "spread_bps"])
+            writer.writerow(["A", bps])
+            writer.writerow(["B", bps])
+    rows = []
+    for d in ("2026-01-01", "2026-01-02", "2026-01-03"):
+        rows.append([d, "A", 100, 2, 1_000_000.0])
+        rows.append([d, "B", 100, 1, 1_000_000.0])
+    data = pd.DataFrame(rows, columns=["timestamp", "asset", "price", "signal", "quote_volume"])
+    tiers = ((0.0, 0.0, 0.0),)
+    calm_res = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0, slippage_rate=0, liquidity_column="quote_volume", liquidity_tiers=tiers, slippage_mode="spread", spread_csv=str(calm)))
+    panic_res = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0, slippage_rate=0, liquidity_column="quote_volume", liquidity_tiers=tiers, slippage_mode="spread", spread_csv=str(panic)))
+    assert panic_res["pnl"].iloc[0].slippage_cost == pytest.approx(50 * calm_res["pnl"].iloc[0].slippage_cost)
+    assert panic_res["metrics"]["total_slippage"] > calm_res["metrics"]["total_slippage"]
+
+
+def test_listing_manifest_adapter_and_survivorship_gap():
+    from crypto_checker.lifecycle import lifecycle_from_listing_manifest, measure_survivorship_gap, active_assets
+    manifest = pd.DataFrame([
+        {"symbol": "GALUSDT", "listed_at": "2022-05-05", "delisted_at": "2024-07-30", "status": "NOT_TRADING", "source": "inferred_vision_first_seen"},
+        {"symbol": "GUSDT", "listed_at": "2024-08-15", "delisted_at": None, "status": "TRADING", "source": "inferred_vision_first_seen"},
+        {"symbol": "LUNAUSDT", "listed_at": "2021-01-28", "delisted_at": "2022-05-13", "status": "NOT_TRADING", "source": "inferred_vision_first_seen"},
+        {"symbol": "BTCUSDT", "listed_at": "2019-12-31", "delisted_at": None, "status": "TRADING", "source": "inferred_vision_first_seen"},
+    ])
+    life = lifecycle_from_listing_manifest(manifest)
+    # GAL+G collapse to one canonical with two segments; LUNA is dead.
+    assert sorted(life["canonical"].unique().tolist()) == ["BTCUSDT", "GUSDT", "LUNAUSDT"]
+    assert active_assets(life, "2024-07-11") == ["BTCUSDT", "GUSDT"]
+    assert active_assets(life, "2024-08-20") == ["BTCUSDT", "GUSDT"]
+    assert active_assets(life, "2021-06-01") == ["BTCUSDT", "LUNAUSDT"]
+    # Dataset holds only BTC+G in 2024: LUNA died before the window (not
+    # bias), but a dead-in-window coin would be flagged.
+    data = pd.DataFrame(
+        [[str(d), "BTCUSDT", 60000.0] for d in pd.date_range("2024-01-01", "2024-01-10", freq="D", tz="UTC")]
+        + [[str(d), "GUSDT", 0.08] for d in pd.date_range("2024-01-01", "2024-01-10", freq="D", tz="UTC")],
+        columns=["timestamp", "asset", "price"],
+    )
+    gap = measure_survivorship_gap(data, manifest)
+    assert gap["n_missing_dead"] == 0  # LUNA died 2022, outside the 2024 window
+    manifest2 = pd.concat([manifest, pd.DataFrame([{"symbol": "FTTUSDT", "listed_at": "2022-04-15", "delisted_at": "2024-06-01", "status": "NOT_TRADING", "source": "inferred_vision_first_seen"}])], ignore_index=True)
+    gap2 = measure_survivorship_gap(data, manifest2)
+    assert gap2["n_missing_dead"] == 1 and gap2["missing_dead"] == ["FTTUSDT"]
+    assert 0.0 < gap2["coverage_ratio"] < 1.0
+
+
+def test_preflight_survivorship_warning_with_manifest():
+    manifest = pd.DataFrame([
+        {"symbol": "BTCUSDT", "listed_at": "2019-12-31", "delisted_at": None, "status": "TRADING", "source": "t"},
+        {"symbol": "FTTUSDT", "listed_at": "2022-04-15", "delisted_at": "2024-06-01", "status": "NOT_TRADING", "source": "t"},
+    ])
+    data = pd.DataFrame(
+        [[str(d), "BTCUSDT", 60000.0, 0.0] for d in pd.date_range("2024-01-01", "2024-01-10", freq="D", tz="UTC")],
+        columns=["timestamp", "asset", "price", "signal"],
+    )
+    check = validate_dataset(data, min_assets=1, min_periods=2, listing_manifest=manifest)
+    assert check["valid"]
+    assert check["survivorship_gap"]["missing_dead"] == ["FTTUSDT"]
+    assert any("SURVIVORSHIP_GAP" in w for w in check["warnings"])
