@@ -250,6 +250,18 @@ Opsi penting: `--signal` (kolom signal), `--signal-lookback`, `--min-signal-gap`
 
 `DEPLOYABLE=True` berarti lolos semua gate, **bukan** jaminan profit. Vonis hanya memakai 5 hard gate — `wf_positive`, `oos_positive`, `no_risk_violations`, `no_capacity_violations`, `reality_check_pass` (IC terbaik lolos koreksi multiple-testing) — gate lain informasional. Satu hard gate gagal -> `DEPLOYABLE False`.
 
+## Recheck Dataset Funded 47-Aset (2024 → 2026-08)
+
+Dataset `data/midcap_2y_daily_2_funded.csv` (funding 100%) dijalankan ulang penuh dengan engine terbaru (`scripts/recheck_v2.py` + `recheck_v2b.py`; output lokal di `reports/recheck_v2/` — reports tidak masuk git). Hasil:
+
+- Walk-forward agregat: +52%, Sharpe 0.85, 4/5 fold profit — terlihat bagus.
+- **DSR (65 trials): 0.175** (null bar 0.92 > observed 0.85) → seleksi kemungkinan beruntung, alpha dibunuh.
+- Static OOS kontinu (low_vol_14): negatif. Ensemble top-3: −13.5%, Sharpe −0.22 — member lain tidak membawa alpha independen.
+- Capacity (low_vol_14): sensible di 10k (headroom 11x) dan 100k (headroom 1.1x, mepet); breach di 1M (59x) dan 10M (partisipasi maks 450% volume — mustahil dieksekusi).
+- **Vonis: DEPLOYABLE False.** Bukan karena universe/eksekusi/biaya (ketiganya terverifikasi) — melainkan tidak ada alpha yang survive koreksi multiple-testing di universe ini. Ruang pencarian ini kering; langkah berikut adalah riset signal/universe baru, bukan tuning parameter.
+
+Catatan: preflight atas CSV mentah melaporkan `valid: False` hanya karena kolom kerja `signal` belum ada (dibuat oleh `canonicalize`/`build_signals`) — bukan cacat data. Backlog: preflight sebaiknya tidak mewajibkan kolom kerja internal.
+
 ## Batasan
 
 - Backtest bukan jaminan profit live; hasil OOS bisa kena regime shift.
