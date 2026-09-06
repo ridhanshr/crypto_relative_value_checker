@@ -59,8 +59,24 @@ def test_validation_requires_long_enough_data():
         run_validation(data, CheckerConfig(n_long=1, n_short=1))
 
 
-def test_rejects_nan_funding():
-    data = pd.DataFrame([["2026-01-01", "A", 100, 2, 0.0], ["2026-01-01", "B", 100, 1, 0.0], ["2026-01-02", "A", 100, 2, float("nan")], ["2026-01-02", "B", 100, 1, 0.0]], columns=["timestamp", "asset", "price", "signal", "funding_rate"])
+def test_nan_funding_tolerated_as_post_ranking_cost():
+    # Funding is a post-ranking cost model: NaN funding on an otherwise
+    # active row must not remove the asset from ranking. It contributes 0.0
+    # to funding PnL and is recorded for investigation.
+    data = pd.DataFrame([
+        ["2026-01-01", "A", 100, 2, 0.01], ["2026-01-01", "B", 100, 1, 0.01],
+        ["2026-01-02", "A", 100, 2, float("nan")], ["2026-01-02", "B", 100, 1, 0.01],
+        ["2026-01-03", "A", 100, 2, 0.01], ["2026-01-03", "B", 100, 1, 0.01],
+    ], columns=["timestamp", "asset", "price", "signal", "funding_rate"])
+    result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0, slippage_rate=0))
+    assert set(result["ranking"].iloc[1].long_assets.split(",")) | set(result["ranking"].iloc[1].short_assets.split(",")) == {"A", "B"}
+    gaps = result["funding_gaps"]
+    assert len(gaps) == 1 and gaps.iloc[0]["reason"] == "active"
+    assert "funding" not in " ".join(result["violations"]["type"].tolist()) if not result["violations"].empty else True
+
+
+def test_rejects_nonfinite_funding():
+    data = pd.DataFrame([["2026-01-01", "A", 100, 2, float("inf")], ["2026-01-01", "B", 100, 1, 0.0]], columns=["timestamp", "asset", "price", "signal", "funding_rate"])
     with pytest.raises(ValueError, match="Funding rate"):
         check_strategy(data, CheckerConfig(n_long=1, n_short=1))
 
@@ -267,7 +283,22 @@ def test_preflight_rejects_missing_funding_and_duplicates():
     result = validate_dataset(data, require_funding=True, min_assets=2, min_periods=1)
     assert result["valid"] is False
     assert any("Duplicate" in error for error in result["errors"])
-    assert any("Funding rate" in error for error in result["errors"])
+    # NaN funding no longer fails validity; it is classified (here: A has no
+    # funding prints at all -> not_listed) and only warned about.
+    assert not any("Funding rate" in error for error in result["errors"])
+    assert any("not_listed" in warning for warning in result["warnings"])
+
+
+def test_preflight_warns_active_funding_gap_without_failing():
+    data = pd.DataFrame([
+        ["2024-01-01", "A", 100, 1, 0.01, 500], ["2024-01-01", "B", 100, 2, 0.01, 600],
+        ["2024-01-02", "A", 101, 1, None, 500], ["2024-01-02", "B", 99, 2, 0.01, 600],
+        ["2024-01-03", "A", 102, 1, 0.01, 500], ["2024-01-03", "B", 98, 2, 0.01, 600],
+    ], columns=["timestamp", "asset", "price", "signal", "funding_rate", "quote_volume"])
+    result = validate_dataset(data, require_funding=True, min_assets=2, min_periods=2)
+    assert result["valid"] is True
+    assert any("FUNDING_GAP_ACTIVE" in warning for warning in result["warnings"])
+    assert result["funding_gap_summary"].get("active", 0) == 1
 
 
 def test_capacity_violation_is_reported():
@@ -442,3 +473,53 @@ def test_invalid_slippage_mode_rejected():
     ], columns=["timestamp", "asset", "price", "signal"])
     with pytest.raises(ValueError):
         check_strategy(data, CheckerConfig(n_long=1, n_short=1, slippage_mode="bogus"))
+
+
+def test_classify_funding_gaps_not_listed_delisted_migration_active():
+    from crypto_checker.assets import classify_funding_gaps
+    data = pd.DataFrame([
+        # A: NaN before first print -> not_listed; NaN after last print -> delisted.
+        ["2024-01-01", "A", 100, 100.0, None],
+        ["2024-01-02", "A", 100, 100.0, 0.01],
+        ["2024-01-03", "A", 100, 100.0, None],
+        # B: NaN between prints with price+volume -> active.
+        ["2024-01-01", "B", 100, 100.0, 0.02],
+        ["2024-01-02", "B", 100, 100.0, None],
+        ["2024-01-03", "B", 100, 100.0, 0.02],
+        # GUSDT inside GAL->G migration window (effective 2024-07-19) -> migration.
+        ["2024-07-18", "GUSDT", 0.04, 100.0, 0.01],
+        ["2024-07-20", "GUSDT", 0.04, 100.0, None],
+        ["2024-07-25", "GUSDT", 0.04, 100.0, 0.01],
+    ], columns=["timestamp", "asset", "price", "volume", "funding_rate"])
+    gaps = classify_funding_gaps(data)
+    by_asset = {row["asset"]: row["reason"] for _, row in gaps.iterrows()}
+    assert by_asset["A"] in ("not_listed", "delisted")
+    assert len(gaps[gaps.asset == "A"]) == 2
+    assert set(gaps[gaps.asset == "A"]["reason"]) == {"not_listed", "delisted"}
+    assert by_asset["B"] == "active"
+    assert by_asset["GUSDT"] == "migration"
+
+
+def test_classify_funding_gaps_empty_when_complete():
+    from crypto_checker.assets import classify_funding_gaps
+    data = pd.DataFrame([
+        ["2024-01-01", "A", 100, 0.01], ["2024-01-02", "A", 100, 0.01],
+    ], columns=["timestamp", "asset", "price", "funding_rate"])
+    gaps = classify_funding_gaps(data)
+    assert list(gaps.columns) == ["timestamp", "asset", "reason"]
+    assert gaps.empty
+
+
+def test_evaluate_deployable_uses_only_hard_gates():
+    from crypto_checker.decision import HARD_GATES, evaluate_deployable
+    assert set(HARD_GATES) == {"wf_positive", "oos_positive", "no_risk_violations", "no_capacity_violations"}
+    passing = {name: True for name in HARD_GATES}
+    assert evaluate_deployable(passing) is True
+    # Informational gates failing must not matter.
+    assert evaluate_deployable({**passing, "wf_sharpe_above_one": False, "static_oos_sharpe_above_one": False}) is True
+    for name in HARD_GATES:
+        failing = {k: True for k in HARD_GATES}
+        failing[name] = False
+        assert evaluate_deployable(failing) is False
+    # Missing keys fail closed.
+    assert evaluate_deployable({}) is False

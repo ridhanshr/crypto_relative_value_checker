@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 
@@ -38,6 +39,110 @@ def canonical_asset(symbol):
 
 def migration_manifest():
     return [{"source_token": old, "canonical_token": new, "price_adjustment_factor": PRICE_ADJUSTMENT_FACTORS[old], **MIGRATION_METADATA[old]} for old, new in MIGRATION_MAP.items()]
+
+
+# Canonical tokens (without quote suffix) that went through a migration,
+# mapped to their official effective date. Used to tell migration-related
+# funding gaps apart from genuinely missing funding on active assets.
+MIGRATION_WINDOW_DAYS = 7
+
+_MIGRATION_CANONICAL_EFFECTIVE = {}
+for _old, _new in MIGRATION_MAP.items():
+    _eff = MIGRATION_METADATA.get(_old, {}).get("effective_date")
+    if _eff is not None:
+        _MIGRATION_CANONICAL_EFFECTIVE[_new] = pd.Timestamp(_eff, tz="UTC")
+
+
+def _base_token(symbol):
+    value = str(symbol).upper()
+    for suffix in ("USDT", "USDC", "BUSD", "BTC", "ETH"):
+        if value.endswith(suffix):
+            return value[: -len(suffix)]
+    return value
+
+
+def classify_funding_gaps(data):
+    """Classify every (timestamp, asset) row with missing funding.
+
+    Returns a DataFrame with columns timestamp, asset, reason, where reason
+    is one of:
+      - "not_listed": before the asset's first observed funding print.
+      - "delisted": after the asset's last observed funding print.
+      - "migration": within +/-MIGRATION_WINDOW_DAYS of the official
+        effective date of a migrated canonical token.
+      - "active": funding exists both before and after this row, i.e. the
+        asset was tradable but funding is missing -> investigate.
+
+    An empty DataFrame (with the same columns) is returned when there is no
+    funding column or no missing funding.
+    """
+    cols = ["timestamp", "asset", "reason"]
+    empty = pd.DataFrame(columns=cols)
+    if "funding_rate" not in data.columns:
+        return empty
+    if "asset" not in data.columns or "timestamp" not in data.columns:
+        # Let canonicalize_assets/_validate raise the proper schema error.
+        return empty
+    frame = data.copy()
+    # Map to canonical names WITHOUT aggregating: canonicalize_assets()
+    # would sum duplicate funding rows (turning all-NaN groups into 0.0),
+    # which would hide gaps. Mapping alone is idempotent.
+    frame["asset"] = frame["asset"].astype(str).map(canonical_asset)
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+    rates = pd.to_numeric(frame["funding_rate"], errors="coerce")
+    missing = frame[rates.isna()].copy()
+    if missing.empty:
+        return empty
+    have = frame[rates.notna()].copy()
+    first_seen = have.groupby("asset")["timestamp"].min().to_dict() if not have.empty else {}
+    last_seen = have.groupby("asset")["timestamp"].max().to_dict() if not have.empty else {}
+    if "price" in frame.columns:
+        price_ok = pd.to_numeric(frame["price"], errors="coerce")
+        price_ok = price_ok.notna() & np.isfinite(price_ok) & (price_ok > 0)
+        price_ok = price_ok.reindex(missing.index, fill_value=False)
+    else:
+        price_ok = pd.Series(False, index=missing.index)
+    vol_cols = [c for c in ("volume", "quote_volume") if c in frame.columns]
+    if vol_cols:
+        vol = pd.Series(np.nan, index=frame.index)
+        for col in vol_cols:
+            col_vol = pd.to_numeric(frame[col], errors="coerce")
+            vol = vol.fillna(col_vol)
+        vol_ok = vol.notna() & np.isfinite(vol) & (vol > 0)
+        vol_ok = vol_ok.reindex(missing.index, fill_value=False)
+    else:
+        # No volume column at all: cannot assess activity from volume,
+        # so price alone decides (documented limitation).
+        vol_ok = pd.Series(True, index=missing.index)
+    rows = []
+    window = pd.Timedelta(days=MIGRATION_WINDOW_DAYS)
+    no_coverage_reference = not first_seen
+    for idx, row in missing.iterrows():
+        ts, asset = row["timestamp"], row["asset"]
+        if pd.isna(ts):
+            reason = "active" if bool(price_ok.get(idx, False)) else "delisted"
+            rows.append({"timestamp": row["timestamp"] if "timestamp" in row else ts, "asset": asset, "reason": reason})
+            continue
+        base = _base_token(asset)
+        eff = _MIGRATION_CANONICAL_EFFECTIVE.get(base)
+        if eff is not None and abs(ts - eff) <= window:
+            reason = "migration"
+        elif no_coverage_reference:
+            # No funding prints exist at all: cannot establish listing
+            # coverage, so anything tradable must be investigated.
+            reason = "active" if bool(price_ok.get(idx, False)) else "delisted"
+        elif asset not in first_seen:
+            reason = "not_listed"
+        elif ts < first_seen[asset]:
+            reason = "not_listed"
+        elif ts > last_seen[asset]:
+            reason = "delisted"
+        elif not bool(price_ok.get(idx, False)) or not bool(vol_ok.get(idx, False)):
+            reason = "delisted"
+        else:
+            reason = "active"
+        rows.append({"timestamp": ts, "asset": asset, "reason": reason})
+    return pd.DataFrame(rows, columns=cols)
 
 
 def apply_price_adjustments(data, factors=None):

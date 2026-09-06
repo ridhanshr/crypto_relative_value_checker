@@ -2,7 +2,7 @@ from pathlib import Path
 import json
 import numpy as np
 import pandas as pd
-from .assets import canonicalize_assets, audit_migration_discontinuities, audit_migration_collisions
+from .assets import canonicalize_assets, audit_migration_discontinuities, audit_migration_collisions, classify_funding_gaps
 
 
 def validate_dataset(data, require_funding=False, require_liquidity=False, min_assets=2, min_periods=2, expected_frequency=None, allow_gaps=False):
@@ -28,8 +28,8 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
             errors.append("Funding rate column required but missing")
         else:
             raw_funding = pd.to_numeric(frame["funding_rate"], errors="coerce")
-            if raw_funding.isna().any() or not np.isfinite(raw_funding).all():
-                errors.append("Funding rate contains NaN, non-numeric, or infinite values")
+            if not np.isfinite(raw_funding.dropna()).all():
+                errors.append("Funding rate contains non-numeric or infinite values")
     try:
         frame = canonicalize_assets(frame)
     except Exception as exc:
@@ -52,13 +52,25 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
     signal = pd.to_numeric(frame["signal"], errors="coerce")
     if signal.isna().any() or not np.isfinite(signal).all():
         errors.append("Signal contains NaN, non-numeric, or infinite values")
-    if require_funding:
-        if "funding_rate" not in frame.columns:
-            errors.append("Funding rate column required but missing")
-        else:
-            funding = pd.to_numeric(frame["funding_rate"], errors="coerce")
-            if funding.isna().any() or not np.isfinite(funding).all():
-                errors.append("Funding rate contains NaN, non-numeric, or infinite values")
+    # Funding gaps are classified on raw data with canonical mapping applied
+    # inside the classifier (no aggregation), so duplicate collapsing in
+    # canonicalize_assets() cannot mask them. Missing funding never blocks
+    # ranking validity: not-listed/delisted/migration gaps are ignored
+    # (funding treated as 0.0 post-ranking); gaps on otherwise active rows
+    # only warn for investigation.
+    funding_gaps = classify_funding_gaps(data)
+    if require_funding and "funding_rate" in frame.columns:
+        funding = pd.to_numeric(frame["funding_rate"], errors="coerce")
+        if not np.isfinite(funding.dropna()).all():
+            errors.append("Funding rate contains non-numeric or infinite values")
+        for reason in ("not_listed", "delisted", "migration"):
+            count = int((funding_gaps["reason"] == reason).sum()) if not funding_gaps.empty else 0
+            if count:
+                warnings.append(f"Ignored {count} missing-funding rows ({reason}); funding treated as 0.0 post-ranking")
+        active_gaps = funding_gaps[funding_gaps["reason"] == "active"] if not funding_gaps.empty else funding_gaps
+        if not active_gaps.empty:
+            sample = active_gaps[["timestamp", "asset"]].astype(str).head(10).to_dict("records")
+            warnings.append(f"FUNDING_GAP_ACTIVE: {len(active_gaps)} rows have price+volume but no funding (treated as 0.0); investigate: {sample}")
     if require_liquidity and "quote_volume" not in frame.columns:
         errors.append("quote_volume required for liquidity-aware costs")
     assets = int(frame["asset"].nunique())
@@ -92,9 +104,13 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
             (errors if not allow_gaps else warnings).append(message)
             if allow_gaps:
                 warnings.append("Gap-tolerant exploratory mode: missing asset-periods trigger forced exits in backtest; NOT valid for futures deployment")
+    if funding_gaps.empty:
+        funding_gap_summary = {}
+    else:
+        funding_gap_summary = {reason: int((funding_gaps["reason"] == reason).sum()) for reason in ("not_listed", "delisted", "migration", "active")}
     membership = frame.groupby(["timestamp", "asset"]).size().reset_index(name="rows")
     membership["timestamp"] = membership["timestamp"].astype(str)
-    return {"valid": not errors, "errors": errors, "warnings": warnings, "rows": int(len(frame)), "assets": assets, "periods": periods, "start": str(frame["timestamp"].min()), "end": str(frame["timestamp"].max()), "funding_present": "funding_rate" in frame.columns, "liquidity_present": "quote_volume" in frame.columns, "universe_membership": membership.to_dict("records"), "asset_status": statuses.astype(str).to_dict("records"), "delisting_suspects": suspects.astype(str).to_dict("records"), "survivorship_note": "Universe berasal dari simbol yang tersedia saat ini; tanpa verifikasi point-in-time membership independen, hasil IC/return berpotensi bias survivorship yang belum terukur."}
+    return {"valid": not errors, "errors": errors, "warnings": warnings, "rows": int(len(frame)), "assets": assets, "periods": periods, "start": str(frame["timestamp"].min()), "end": str(frame["timestamp"].max()), "funding_present": "funding_rate" in frame.columns, "liquidity_present": "quote_volume" in frame.columns, "funding_gap_summary": funding_gap_summary, "universe_membership": membership.to_dict("records"), "asset_status": statuses.astype(str).to_dict("records"), "delisting_suspects": suspects.astype(str).to_dict("records"), "survivorship_note": "Universe berasal dari simbol yang tersedia saat ini; tanpa verifikasi point-in-time membership independen, hasil IC/return berpotensi bias survivorship yang belum terukur."}
 
 
 def write_preflight(result, output_dir):

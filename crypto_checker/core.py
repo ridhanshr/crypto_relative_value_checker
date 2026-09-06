@@ -3,7 +3,7 @@ from pathlib import Path
 import json
 import numpy as np
 import pandas as pd
-from .assets import canonicalize_assets, audit_migration_collisions
+from .assets import canonicalize_assets, audit_migration_collisions, classify_funding_gaps
 
 
 @dataclass(frozen=True)
@@ -53,9 +53,12 @@ def _validate(data, signal_column):
     if data[signal_column].isna().any() or not np.isfinite(data[signal_column]).all():
         raise ValueError(f"Signal column {signal_column} must be numeric and non-null")
     if "funding_rate" in data:
+        # Funding is a post-ranking cost model: NaN is tolerated here and
+        # classified downstream (not-listed/delisted/migration vs active).
+        # Only non-numeric strings and infinite values are rejected.
         data["funding_rate"] = pd.to_numeric(data["funding_rate"], errors="raise")
-        if data["funding_rate"].isna().any() or not np.isfinite(data["funding_rate"]).all():
-            raise ValueError("Funding rate must be finite and non-null")
+        if not np.isfinite(data["funding_rate"].dropna()).all():
+            raise ValueError("Funding rate must be finite where present")
     return data.sort_values(["timestamp", "asset"]).reset_index(drop=True)
 
 
@@ -104,9 +107,16 @@ def check_strategy(data, config=None):
     cfg = config or CheckerConfig()
     if cfg.reject_migration_collisions and not audit_migration_collisions(data).empty:
         raise ValueError("Migration source collision detected; resolve effective-date overlap before backtest")
+    # Funding is a post-ranking cost model: missing funding never removes an
+    # asset from ranking. Classify gaps on raw (pre-aggregation) data so
+    # duplicate collapsing cannot mask them, fill with 0.0 for PnL, and keep
+    # the classification for audit. Only "active" gaps need investigation.
+    funding_gaps = classify_funding_gaps(data)
     data = canonicalize_assets(data)
     if cfg.require_funding and "funding_rate" not in data.columns:
         raise ValueError("Funding rate column required for this strategy")
+    if "funding_rate" in data.columns:
+        data["funding_rate"] = data["funding_rate"].fillna(0.0)
     data = _validate(data, cfg.signal_column)
     if cfg.signal_lookback > 1:
         data[cfg.signal_column] = data.groupby("asset")[cfg.signal_column].transform(lambda x: x.rolling(cfg.signal_lookback, min_periods=cfg.signal_lookback).mean())
@@ -231,7 +241,9 @@ def check_strategy(data, config=None):
     violations = pd.DataFrame(violation_rows)
     capacity = violations[violations["type"] == "capacity_limit"].copy() if not violations.empty and "type" in violations else pd.DataFrame()
     summary["capacity_violations"] = int(len(capacity))
-    return {"ranking": ranking, "exposure": exposure, "positions": position_frame, "turnover": turnover[["timestamp", "turnover"]], "trades": pd.DataFrame(trade_rows), "pnl": pnl, "violations": violations, "capacity": capacity, "metrics": summary}
+    funding_warnings = funding_gaps[funding_gaps["reason"] == "active"].copy() if not funding_gaps.empty else funding_gaps.copy()
+    summary["funding_warnings"] = int(len(funding_warnings))
+    return {"ranking": ranking, "exposure": exposure, "positions": position_frame, "turnover": turnover[["timestamp", "turnover"]], "trades": pd.DataFrame(trade_rows), "pnl": pnl, "violations": violations, "capacity": capacity, "funding_gaps": funding_gaps, "funding_warnings": funding_warnings, "metrics": summary}
 
 
 def write_reports(result, output_dir):

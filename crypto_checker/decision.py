@@ -10,6 +10,20 @@ from .selection import walk_forward
 REGIME_MIN_PROFIT = 0.5
 
 
+# Deployment verdict uses ONLY these hard gates. Everything else in
+# "gates" is informational context. If any hard gate fails,
+# deployable is False and evaluation stops there.
+HARD_GATES = ("wf_positive", "oos_positive", "no_risk_violations", "no_capacity_violations")
+
+
+def evaluate_deployable(gates):
+    """Pure deployability verdict from a gates mapping.
+
+    Missing hard-gate keys count as failed (fail-closed).
+    """
+    return all(bool(gates.get(name, False)) for name in HARD_GATES)
+
+
 def deployment_decision(data, output_dir="reports/research", min_train_days=365, test_days=120, candidates=None, n_sides_grid=(3,), vol_target_annual=0.20, rebalance_every=5, fee_rate=0.0004, slippage_rate=0.0005, require_funding=False, spread_check_passed=False):
     from .signals import build_signals, available_candidates
     built = build_signals(data)
@@ -48,6 +62,7 @@ def deployment_decision(data, output_dir="reports/research", min_train_days=365,
         "static_stress_positive": validation["gates"]["stress_positive"],
         "no_risk_violations": validation["gates"]["no_risk_violations"],
         "no_capacity_violations": validation["gates"].get("no_capacity_violations", False),
+        "oos_positive": validation["gates"]["oos_positive"],
         "spread_check_passed": bool(spread_check_passed),
         "majority_regimes_profitable": bool(profitable_regimes >= len(regime_rows) * REGIME_MIN_PROFIT),
     }
@@ -63,8 +78,9 @@ def deployment_decision(data, output_dir="reports/research", min_train_days=365,
         "profitable_regimes": profitable_regimes,
         "total_regimes": len(regime_rows),
         "gates": gates,
+        "hard_gates": list(HARD_GATES),
     }
-    decision["deployable"] = all(gates.values())
+    decision["deployable"] = evaluate_deployable(gates)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     Path(output_dir, "deployment_decision.json").write_text(json.dumps(decision, indent=2, default=str), encoding="utf-8")
     return decision
