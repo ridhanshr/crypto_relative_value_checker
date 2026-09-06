@@ -157,3 +157,41 @@ mesin audit.** `DEPLOYABLE False` pada run ini adalah bukti mesinnya bekerja
 low_vol_30), bukan bukti mesinnya rusak. Perbaikan yang masih layak dilakukan
 hanya penyelarasan teks warning gap-tolerant (poin 3.1) dan pengulangan spread
 check berkala; tidak ada bug fungsional yang tersisa dari sisi audit ini.
+
+## 5. Recheck engine terbaru (`reports/recheck_v2`, dataset funded 47-aset)
+
+Sejak run di atas, lima kemampuan ditambahkan (commit `2be58c7`): asset
+lifecycle engine, aturan eksekusi tunggal signal(t)→t+1, Deflated Sharpe Ratio,
+capacity curve AUM, dan ensemble signal. Dataset
+`data/midcap_2y_daily_2_funded.csv` (47 aset, 2024 → 2026-08, funding 100%)
+dijalankan ulang penuh (`scripts/recheck_v2.py` + `recheck_v2b.py`).
+Suite kini **65 test lulus**.
+
+### 5.1 Hasil
+
+- Walk-forward agregat: **+52%, Sharpe 0.85, 4/5 fold profit** (low_vol_14 menang 4 fold, carry_lowvol_z 1 fold) — terlihat bagus.
+- **DSR (65 trials): 0.175** — null bar 0.92 > observed 0.85 → seleksi kemungkinan beruntung. Alpha dibunuh.
+- Static OOS kontinu (low_vol_14): negatif. Ensemble top-3: **−13,5%, Sharpe −0,22** — member lain (momentum_7/30, vol_adj_carry, ...) tidak membawa alpha independen; diversifikasi naif hanya mengencerkan.
+- Capacity (low_vol_14, full-period +11%, Sharpe 0,31, DD −40%): sensible di 10k (headroom 11x) dan 100k (headroom 1,1x — mepet); breach di 1M (59 breach) dan 10M (partisipasi maks 450% volume — mustahil dieksekusi).
+- Risk violations tetap ada; WF drawdown −37%. **Vonis: DEPLOYABLE False.**
+- Preflight atas CSV mentah: `valid: False` satu-satunya sebab kolom kerja `signal` belum ada (dibuat `canonicalize`/`build_signals`) — bukan cacat data. Lifecycle: 47 segmen terbentuk bersih, funding 100%, likuiditas hadir.
+
+### 5.2 Penilaian subsistem baru
+
+| Subsistem | Nilai |
+|---|---|
+| Lifecycle engine | Baik — 47 segmen, batas migrasi official, listing inferensi dilabel eksplisit; manifest CSV siap kurasi manual |
+| Aturan eksekusi t+1 | Baik — menutup lubang lookahead nyata (signal custom/default lama terisi di bar observasi); 10 test lama gagal persis sesuai prediksi teori dan dihitung ulang manual |
+| DSR | Baik — melakukan tugasnya: membunuh WF +52% yang tanpa koreksi terlihat deployable; reduksi ke PSR saat N=1 terverifikasi independen |
+| Ensemble | Baik — dilaporkan diagnostik saja, tidak masuk vonis; hasil merahnya konsisten (member sampah), bukan artefak |
+| Capacity curve | Baik — re-run aktual per AUM, bukan ekstrapolasi; headroom kuantitatif; menolak mengarang likuiditas |
+
+### 5.3 Kesimpulan recheck
+
+Mesin kini menemukan (low_vol_14 menang 4/5 fold), menguji (gates + DSR +
+capacity + ensemble), dan membunuh (DSR 0,175, OOS negatif) alpha — tanpa
+bergantung pada satu signal. `DEPLOYABLE False` kali ini lebih kuat dari
+sebelumnya: bukan "strategi merugi", melainkan "tidak ada alpha yang survive
+koreksi multiple-testing di universe ini". Fondasi universe/eksekusi/biaya
+terverifikasi; yang kering adalah ruang pencarian. Langkah berikut adalah
+riset signal/universe baru, bukan tuning — 65 trials sudah cukup menjadi bukti.
