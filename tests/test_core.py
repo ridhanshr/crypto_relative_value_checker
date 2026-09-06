@@ -134,7 +134,25 @@ def test_carry_signal_is_negative_funding():
         ["2026-01-01", "A", 100, 0, 0.01], ["2026-01-02", "A", 100, 0, -0.02],
     ], columns=["timestamp", "asset", "price", "signal", "funding_rate"])
     built = build_signals(data)
-    assert built["carry"].tolist() == pytest.approx([-0.01, 0.02])
+    # Shifted by one bar: today's print is only known at/after close(t).
+    assert pd.isna(built["carry"].iloc[0])
+    assert built["carry"].iloc[1] == pytest.approx(-0.01)
+
+
+def test_contemporaneous_signals_cannot_see_today():
+    # Reversal, carry and residual signals must be lagged one bar so that
+    # signal(t) never contains information revealed only at close(t).
+    dates = pd.date_range("2026-01-01", periods=40, freq="D", tz="UTC")
+    rows = []
+    for i, ts in enumerate(dates):
+        rows.append([ts, "A", 100 + i, 0.001])
+        rows.append([ts, "B", 100 - i, 0.001])
+    data = pd.DataFrame(rows, columns=["timestamp", "asset", "price", "funding_rate"])
+    built = build_signals(data)
+    a = built[built.asset == "A"].reset_index(drop=True)
+    # reversal_1 at bar i must equal -(return over i-1 -> i-2), not today's move.
+    assert a.loc[5, "reversal_1"] == pytest.approx(-(a.loc[4, "price"] / a.loc[3, "price"] - 1))
+    assert a.loc[5, "carry"] == pytest.approx(-a.loc[4, "funding_rate"])
 
 
 def test_ranking_uses_configured_signal_column():
@@ -199,7 +217,9 @@ def test_funding_surprise_uses_prior_mean():
     })
     built = build_signals(data)
     a = built[built.asset == "A"].reset_index(drop=True)
-    assert a["funding_surprise"].iloc[15] == pytest.approx(-(0.03 - 0.01))
+    # Lagged one bar: surprise at bar 15 uses the 0.01 print from bar 14,
+    # not the 0.03 print revealed only at bar 15's close.
+    assert a["funding_surprise"].iloc[15] == pytest.approx(-(0.01 - 0.01))
 
 
 def test_liquidity_tiers_charge_illiquid_assets_more():

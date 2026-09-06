@@ -53,13 +53,16 @@ built = build_signals(data)
 tiers = ((0.75, 0.0005, 0.0005), (0.5, 0.0005, 0.001), (0.25, 0.0005, 0.002), (0.0, 0.0005, 0.004))
 spread_csv = str(out / "spread_check.csv") if args.slippage_mode == "spread" and spread is not None else ""
 slippage_mode = args.slippage_mode if spread_csv else "tier"
-base = dict(n_long=3, n_short=3, fee_rate=0.0005, slippage_rate=0.0005, rebalance_every=5, vol_target_annual=0.15, liquidity_column="quote_volume", liquidity_tiers=tiers, slippage_mode=slippage_mode, spread_csv=spread_csv, require_funding=args.require_funding, delist_mode="forced_exit")
-for signal in ("low_vol_14", "low_vol_30", "reversal_1", "resid_reversal_14", "resid_reversal_30"):
+# Family focus (M11B remediation): only the low-vol family showed positive IC
+# and non-negative full-sample returns. Rebalance slowed 5 -> 10 and a small
+# hysteresis gap added to suppress turnover churn (was 0.08-0.33/day).
+base = dict(n_long=3, n_short=3, fee_rate=0.0005, slippage_rate=0.0005, rebalance_every=10, min_signal_gap=0.002, vol_target_annual=0.15, liquidity_column="quote_volume", liquidity_tiers=tiers, slippage_mode=slippage_mode, spread_csv=spread_csv, require_funding=args.require_funding, delist_mode="forced_exit")
+for signal in ("low_vol_14", "low_vol_30"):
     frame = built.dropna(subset=[signal]).reset_index(drop=True)
     result = check_strategy(frame, CheckerConfig(signal_column=signal, **base))
     write_reports(result, out / signal)
 
-wf = walk_forward(data, base_config=CheckerConfig(**base), candidates=("low_vol_14", "low_vol_30", "reversal_1", "resid_reversal_14", "resid_reversal_30"), n_sides_grid=(3,), min_train_days=365, test_days=120, output_dir=out / "walk_forward", vol_target_annual=0.15)
+wf = walk_forward(data, base_config=CheckerConfig(**base), candidates=("low_vol_14", "low_vol_30"), n_sides_grid=(3,), min_train_days=365, test_days=120, output_dir=out / "walk_forward", vol_target_annual=0.15)
 summary = {"mode": "futures" if "funding_rate" in data.columns else "price_only", "gap_tolerant": bool(args.allow_gaps), "cost_tiers": tiers, "slippage_mode": slippage_mode, "spread_csv": spread_csv, "assets": symbols, "preflight": preflight, "spread_check_passed": spread is not None, "spread_required_for_deployment": True, "universe_manifest": coverage.astype(str).to_dict("records"), "forced_exit_assets": forced_exit_assets.astype(str).to_dict("records"), "survivorship_note": preflight.get("survivorship_note"), "walk_forward": wf}
 summary["deployable"] = bool(wf["deployable"] and spread is not None and preflight["valid"])
 (out / "analysis_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")

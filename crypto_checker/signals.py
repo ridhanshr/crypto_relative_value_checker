@@ -17,13 +17,15 @@ def _residual_reversal(frame, k):
     for asset in wide.columns:
         if asset == "BTCUSDT":
             neutral = pd.Series(0.0, index=wide.index)
-            neutral.iloc[:k - 1] = np.nan
+            neutral.iloc[:k] = np.nan
             out[asset] = neutral
             continue
         series = wide[asset]
         beta = series.rolling(k, min_periods=k).cov(btc) / btc.rolling(k, min_periods=k).var()
         resid = series.rolling(k, min_periods=k).sum() - beta * btc_k
-        out[asset] = -resid
+        # Shift by one bar: the residual uses information through close(t),
+        # so it may only drive positions executed at/after the next bar.
+        out[asset] = (-resid).shift(1)
     stacked = out.rename_axis(columns="asset").stack().rename(f"resid_reversal_{k}").reset_index()
     return frame.merge(stacked, on=["timestamp", "asset"], how="left")
 
@@ -46,12 +48,16 @@ def build_signals(data):
         vol = frame.groupby("asset")["asset_return"].transform(lambda s, k=k: s.shift(1).rolling(k, min_periods=k).std())
         frame[f"vol_adj_momentum_{k}"] = frame[f"momentum_{k}"] / vol.replace(0, np.nan)
         frame[f"low_vol_{k}"] = -vol
-    frame["reversal_1"] = -frame["asset_return"]
+    # Shift by one bar: reversal uses the just-closed return, so without a
+    # shift the signal would be filled at the same close it observes.
+    frame["reversal_1"] = frame.groupby("asset")["asset_return"].transform(lambda s: -s.shift(1))
     if "funding_rate" in frame.columns:
         frame["funding_rate"] = pd.to_numeric(frame["funding_rate"], errors="raise")
-        frame["carry"] = -frame["funding_rate"]
+        # Same treatment: today's funding print is only known at/after close(t).
+        lagged_funding = frame.groupby("asset")["funding_rate"].transform(lambda s: s.shift(1))
+        frame["carry"] = -lagged_funding
         mean_funding = frame.groupby("asset")["funding_rate"].transform(lambda s: s.shift(1).rolling(14, min_periods=14).mean())
-        frame["funding_surprise"] = -(frame["funding_rate"] - mean_funding)
+        frame["funding_surprise"] = -(lagged_funding - mean_funding)
         vol_14 = frame.groupby("asset")["asset_return"].transform(lambda s: s.shift(1).rolling(14, min_periods=14).std())
         frame["vol_adj_carry"] = frame["carry"] / vol_14.replace(0, np.nan)
     for k in (14, 30):
@@ -70,7 +76,7 @@ def available_candidates(frame):
 
 def warmup_days(signal_name):
     if signal_name in ("reversal_1", "carry"):
-        return 1
+        return 2
     if signal_name == "funding_surprise":
         return 15
     if signal_name == "vol_adj_carry":
@@ -78,7 +84,7 @@ def warmup_days(signal_name):
     if signal_name == "carry_mom_z":
         return 31
     if signal_name.startswith("resid_reversal_"):
-        return int(signal_name.rsplit("_", 1)[-1])
+        return int(signal_name.rsplit("_", 1)[-1]) + 1
     if signal_name.startswith("low_vol_"):
         return int(signal_name.rsplit("_", 1)[-1])
     if signal_name.startswith(("momentum_", "vol_adj_momentum_")):
