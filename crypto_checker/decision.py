@@ -5,6 +5,7 @@ import pandas as pd
 from .core import CheckerConfig, check_strategy
 from .validation import run_validation
 from .selection import walk_forward
+from .reality_check import reality_check
 
 
 REGIME_MIN_PROFIT = 0.5
@@ -13,7 +14,7 @@ REGIME_MIN_PROFIT = 0.5
 # Deployment verdict uses ONLY these hard gates. Everything else in
 # "gates" is informational context. If any hard gate fails,
 # deployable is False and evaluation stops there.
-HARD_GATES = ("wf_positive", "oos_positive", "no_risk_violations", "no_capacity_violations")
+HARD_GATES = ("wf_positive", "oos_positive", "no_risk_violations", "no_capacity_violations", "reality_check_pass")
 
 
 def evaluate_deployable(gates):
@@ -38,6 +39,7 @@ def deployment_decision(data, output_dir="reports/research", min_train_days=365,
         ic_table.append(row.to_dict())
         if not pd.isna(row["ic_tstat"]) and abs(row["ic_tstat"]) >= 2.0:
             ic_pass.append(row["signal"])
+    rc = reality_check(ic_table)
 
     wf = walk_forward(data, base_config=CheckerConfig(fee_rate=fee_rate, slippage_rate=slippage_rate, rebalance_every=rebalance_every, require_funding=require_funding, delist_mode=delist_mode), min_train_days=min_train_days, test_days=test_days, candidates=wf_candidates, n_sides_grid=n_sides_grid, vol_target_annual=vol_target_annual, output_dir=output_dir)
     best_signal = pd.Series([f["signal"] for f in wf["folds"]]).mode().iloc[0]
@@ -63,6 +65,7 @@ def deployment_decision(data, output_dir="reports/research", min_train_days=365,
         "no_risk_violations": validation["gates"]["no_risk_violations"],
         "no_capacity_violations": validation["gates"].get("no_capacity_violations", False),
         "oos_positive": validation["gates"]["oos_positive"],
+        "reality_check_pass": bool(rc.get("pass", False)),
         "spread_check_passed": bool(spread_check_passed),
         "majority_regimes_profitable": bool(profitable_regimes >= len(regime_rows) * REGIME_MIN_PROFIT),
     }
@@ -72,6 +75,7 @@ def deployment_decision(data, output_dir="reports/research", min_train_days=365,
         "config": {"n_long": best_n, "n_short": best_n, "fee_rate": fee_rate, "slippage_rate": slippage_rate, "vol_target_annual": vol_target_annual, "rebalance_every": rebalance_every},
         "ic_pass_signals": ic_pass,
         "ic_table": ic_table,
+        "reality_check": rc,
         "walk_forward": wf,
         "validation_best_signal": {k: v for k, v in validation.items() if k != "regimes"},
         "regimes": regime_rows,

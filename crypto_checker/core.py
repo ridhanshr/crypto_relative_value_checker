@@ -35,6 +35,7 @@ class CheckerConfig:
     cost_multiplier: float = 1.0
     slippage_mode: str = "tier"
     spread_csv: str = ""
+    periods_per_year: float | None = None
 
 
 def _validate(data, signal_column):
@@ -86,6 +87,25 @@ def _load_spread_map(spread_csv):
     return spread_map
 
 
+def infer_periods_per_year(timestamps) -> float:
+    """Periods per calendar year inferred from timestamp spacing.
+
+    Daily bars -> 365.0 (exact, preserves legacy behavior), 4h -> 2190.0,
+    1h -> 8760.0; anything else is computed continuously. Used for all
+    annualization (Sharpe, volatility, annualized return, vol targeting).
+    """
+    ts = pd.to_datetime(pd.Series(list(timestamps)), utc=True, errors="coerce").dropna().sort_values().drop_duplicates()
+    if len(ts) < 2:
+        return 365.0
+    median_secs = float(ts.diff().dt.total_seconds().median())
+    if median_secs <= 0:
+        return 365.0
+    for bucket_secs, ppy in ((86400.0, 365.0), (14400.0, 2190.0), (3600.0, 8760.0)):
+        if abs(median_secs - bucket_secs) / bucket_secs <= 0.01:
+            return ppy
+    return 365.25 * 86400.0 / median_secs
+
+
 def _assign_liquidity_tier_rates(data, cfg):
     liq = pd.to_numeric(data[cfg.liquidity_column], errors="coerce")
     data["_liq_score"] = liq.groupby(data["asset"]).transform(lambda s: s.rolling(cfg.liquidity_lookback, min_periods=1).mean().shift(1))
@@ -104,6 +124,18 @@ def _assign_liquidity_tier_rates(data, cfg):
 
 
 def check_strategy(data, config=None):
+    """Run the cross-sectional long-short backtest.
+
+    Timing convention (timestamps are candle OPEN times; ``price`` is the
+    candle close):
+      * signal(t) may only use information available at/before close(t)
+        (all built-in factors are shift(1)-lagged or contemporaneous-t).
+      * Positions decided at t are executed at the next bar open, i.e. at
+        close(t) prices, and first earn PnL over the t -> t+1 move. No PnL
+        is ever accrued in the same bar the signal is observed.
+      * ``execution_timestamp`` in position rows is therefore always the
+        timestamp following ``signal_timestamp``.
+    """
     cfg = config or CheckerConfig()
     if cfg.reject_migration_collisions and not audit_migration_collisions(data).empty:
         raise ValueError("Migration source collision detected; resolve effective-date overlap before backtest")
@@ -121,7 +153,7 @@ def check_strategy(data, config=None):
     if cfg.signal_lookback > 1:
         data[cfg.signal_column] = data.groupby("asset")[cfg.signal_column].transform(lambda x: x.rolling(cfg.signal_lookback, min_periods=cfg.signal_lookback).mean())
         data = data.dropna(subset=[cfg.signal_column]).reset_index(drop=True)
-    if cfg.n_long < 1 or cfg.n_short < 1 or cfg.initial_equity <= 0 or cfg.gross_exposure <= 0 or cfg.fee_rate < 0 or cfg.slippage_rate < 0 or cfg.signal_lookback < 1 or cfg.min_signal_gap < 0 or cfg.rebalance_every < 1 or not 0 < cfg.max_drawdown_limit < 1 or not 0 < cfg.daily_loss_limit < 1 or cfg.vol_target_annual < 0 or cfg.vol_lookback < 2 or not 0 < cfg.vol_warmup_scale <= 1 or cfg.liquidity_lookback < 1 or not 0 < cfg.max_volume_participation <= 1 or cfg.cost_multiplier < 0 or cfg.delist_mode not in ("error", "forced_exit") or cfg.slippage_mode not in ("tier", "spread"):
+    if cfg.n_long < 1 or cfg.n_short < 1 or cfg.initial_equity <= 0 or cfg.gross_exposure <= 0 or cfg.fee_rate < 0 or cfg.slippage_rate < 0 or cfg.signal_lookback < 1 or cfg.min_signal_gap < 0 or cfg.rebalance_every < 1 or not 0 < cfg.max_drawdown_limit < 1 or not 0 < cfg.daily_loss_limit < 1 or cfg.vol_target_annual < 0 or cfg.vol_lookback < 2 or not 0 < cfg.vol_warmup_scale <= 1 or cfg.liquidity_lookback < 1 or not 0 < cfg.max_volume_participation <= 1 or cfg.cost_multiplier < 0 or cfg.delist_mode not in ("error", "forced_exit") or cfg.slippage_mode not in ("tier", "spread") or (cfg.periods_per_year is not None and cfg.periods_per_year <= 0):
         raise ValueError("Invalid checker configuration")
     if cfg.liquidity_tiers:
         thresholds = [t[0] for t in cfg.liquidity_tiers]
@@ -131,6 +163,7 @@ def check_strategy(data, config=None):
     if tiered_costs:
         data = _assign_liquidity_tier_rates(data, cfg)
     timestamps = list(data["timestamp"].drop_duplicates())
+    ppy = cfg.periods_per_year if cfg.periods_per_year else infer_periods_per_year(timestamps)
     positions = {}
     ranking_rows, position_rows, trade_rows, pnl_rows, violation_rows = [], [], [], [], []
     equity = cfg.initial_equity
@@ -143,7 +176,7 @@ def check_strategy(data, config=None):
         if cfg.vol_target_annual > 0:
             if len(trailing_returns) >= cfg.vol_lookback:
                 realized = float(np.std(trailing_returns[-cfg.vol_lookback:], ddof=1))
-                target_daily = cfg.vol_target_annual / (365 ** 0.5)
+                target_daily = cfg.vol_target_annual / (ppy ** 0.5)
                 if realized > 0:
                     vol_scale = min(1.0, target_daily / realized)
             else:
@@ -212,6 +245,7 @@ def check_strategy(data, config=None):
             slippage = turnover_notional * cfg.slippage_rate * cfg.cost_multiplier
         total = price_pnl + funding - fee - slippage
         equity += total
+        peak_equity = max(peak_equity, equity)
         daily_return = total / (equity - total)
         trailing_returns.append(daily_return)
         drawdown = equity / peak_equity - 1
@@ -237,7 +271,7 @@ def check_strategy(data, config=None):
     equity_curve = pnl["equity"]
     equity_full = pd.concat([pd.Series([cfg.initial_equity]), equity_curve], ignore_index=True)
     drawdown = (equity_full / equity_full.cummax() - 1).iloc[1:]
-    summary = {"initial_equity": cfg.initial_equity, "final_equity": float(equity_curve.iloc[-1]), "total_return": float(equity_curve.iloc[-1] / cfg.initial_equity - 1), "periods": len(active_pnl), "annualized_return": float((equity_curve.iloc[-1] / cfg.initial_equity) ** (365 / max(len(active_pnl), 1)) - 1), "annualized_volatility": float(returns.std(ddof=1) * (365 ** 0.5)) if len(returns) > 1 else 0.0, "sharpe": float(returns.mean() / returns.std(ddof=1) * (365 ** 0.5)) if len(returns) > 1 and returns.std(ddof=1) else 0.0, "max_drawdown": float(drawdown.min()), "winning_periods": int((returns > 0).sum()), "losing_periods": int((returns < 0).sum()), "total_fees": float(pnl.fee_cost.sum()), "total_slippage": float(pnl.slippage_cost.sum()), "average_turnover": float(active_pnl.turnover.mean()) if len(active_pnl) else 0.0}
+    summary = {"initial_equity": cfg.initial_equity, "final_equity": float(equity_curve.iloc[-1]), "total_return": float(equity_curve.iloc[-1] / cfg.initial_equity - 1), "periods": len(active_pnl), "periods_per_year": float(ppy), "annualized_return": float((equity_curve.iloc[-1] / cfg.initial_equity) ** (ppy / max(len(active_pnl), 1)) - 1), "annualized_volatility": float(returns.std(ddof=1) * (ppy ** 0.5)) if len(returns) > 1 else 0.0, "sharpe": float(returns.mean() / returns.std(ddof=1) * (ppy ** 0.5)) if len(returns) > 1 and returns.std(ddof=1) else 0.0, "max_drawdown": float(drawdown.min()), "winning_periods": int((returns > 0).sum()), "losing_periods": int((returns < 0).sum()), "total_fees": float(pnl.fee_cost.sum()), "total_slippage": float(pnl.slippage_cost.sum()), "average_turnover": float(active_pnl.turnover.mean()) if len(active_pnl) else 0.0}
     violations = pd.DataFrame(violation_rows)
     capacity = violations[violations["type"] == "capacity_limit"].copy() if not violations.empty and "type" in violations else pd.DataFrame()
     summary["capacity_violations"] = int(len(capacity))

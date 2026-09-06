@@ -3,7 +3,7 @@ from pathlib import Path
 import json
 import numpy as np
 import pandas as pd
-from .core import CheckerConfig, check_strategy
+from .core import CheckerConfig, check_strategy, infer_periods_per_year
 from .reality_check import reality_check
 
 
@@ -23,6 +23,7 @@ def _segment_metrics(full_pnl, full_violations, dates, initial_equity):
     first_idx = int(seg.index[0])
     equity_start = float(full_pnl.iloc[first_idx - 1].equity) if first_idx > 0 else float(initial_equity)
     equity_end = float(seg.equity.iloc[-1])
+    ppy = infer_periods_per_year(dates)
     returns = seg["return"].astype(float)
     std = returns.std(ddof=1)
     curve = pd.concat([pd.Series([equity_start]), seg.equity.reset_index(drop=True)], ignore_index=True)
@@ -32,7 +33,7 @@ def _segment_metrics(full_pnl, full_violations, dates, initial_equity):
     else:
         seg_violations = pd.DataFrame()
     avg_turnover = float(seg.turnover.mean())
-    return {"initial_equity": equity_start, "final_equity": equity_end, "total_return": equity_end / equity_start - 1, "periods": int(len(seg)), "annualized_return": float((equity_end / equity_start) ** (365 / max(len(seg), 1)) - 1), "annualized_volatility": float(std * 365 ** 0.5) if len(returns) > 1 and std else 0.0, "sharpe": float(returns.mean() / std * 365 ** 0.5) if len(returns) > 1 and std else 0.0, "max_drawdown": float(drawdown.min()), "winning_periods": int((returns > 0).sum()), "losing_periods": int((returns < 0).sum()), "average_turnover": avg_turnover, "turnover_flag": "OVER" if avg_turnover > 0.15 else "OK", "turnover_note": "average_turnover is fraction of equity turned over per period; academic survival threshold is ~50%/month one-sided (~0.023/day); OVER means turnover alone can dominate net returns", "risk_violations": int(len(seg_violations)), "capacity_violations": int((seg_violations["type"] == "capacity_limit").sum()) if not seg_violations.empty and "type" in seg_violations else 0, "forced_exits": int((seg_violations["type"] == "forced_exit").sum()) if not seg_violations.empty and "type" in seg_violations else 0}
+    return {"initial_equity": equity_start, "final_equity": equity_end, "total_return": equity_end / equity_start - 1, "periods": int(len(seg)), "periods_per_year": float(ppy), "annualized_return": float((equity_end / equity_start) ** (ppy / max(len(seg), 1)) - 1), "annualized_volatility": float(std * ppy ** 0.5) if len(returns) > 1 and std else 0.0, "sharpe": float(returns.mean() / std * ppy ** 0.5) if len(returns) > 1 and std else 0.0, "max_drawdown": float(drawdown.min()), "winning_periods": int((returns > 0).sum()), "losing_periods": int((returns < 0).sum()), "average_turnover": avg_turnover, "turnover_flag": "OVER" if avg_turnover > 0.15 else "OK", "turnover_note": "average_turnover is fraction of equity turned over per period; academic survival threshold is ~50%/month one-sided (~0.023/day); OVER means turnover alone can dominate net returns", "risk_violations": int(len(seg_violations)), "capacity_violations": int((seg_violations["type"] == "capacity_limit").sum()) if not seg_violations.empty and "type" in seg_violations else 0, "forced_exits": int((seg_violations["type"] == "forced_exit").sum()) if not seg_violations.empty and "type" in seg_violations else 0}
 
 
 def benchmark_equal_weight(data):
@@ -60,7 +61,14 @@ def benchmark_suite(data):
     for asset in ("BTCUSDT", "ETHUSDT"):
         series = frame[frame.asset == asset].set_index("timestamp")["price"].pct_change()
         result[asset.lower()] = {"total_return": compound(series), "periods": int(series.dropna().size)}
-    result["long_only_equal_weight"] = {"total_return": compound(daily.clip(lower=0)), "periods": int(daily.size)}
+    # NOTE: a previous version clipped negative days here (daily.clip(lower=0)),
+    # which fabricates returns no long-only portfolio can achieve. A true
+    # long-only equal-weight basket is exactly `equal_weight` above.
+    result["long_only_equal_weight"] = {"total_return": compound(daily), "periods": int(daily.size)}
+    if "btcusdt" in result:
+        result["btc_buy_hold"] = result["btcusdt"]
+    if "ethusdt" in result:
+        result["eth_buy_hold"] = result["ethusdt"]
     result["market_neutral_random_reference"] = {"total_return": 0.0, "periods": int(daily.size), "note": "zero-return theoretical neutral reference"}
     return result
 
@@ -70,7 +78,10 @@ def regime_labels(data):
     btc["ret"] = btc["price"].pct_change()
     btc["trend"] = btc["ret"].rolling(30).sum()
     btc["vol"] = btc["ret"].rolling(30).std()
-    vol_cutoff = btc["vol"].quantile(0.66)
+    # Expanding quantile: the hi/lo-vol cutoff at time t uses only data
+    # available up to t. A full-sample quantile would leak future volatility
+    # regimes into past labels.
+    vol_cutoff = btc["vol"].expanding().quantile(0.66)
     trend = np.select([btc["trend"] > 0.10, btc["trend"] < -0.10], ["bull", "bear"], default="sideways")
     vol_state = np.where(btc["vol"] > vol_cutoff, "hi_vol", "lo_vol")
     btc["regime"] = [f"{t}_{v}" for t, v in zip(trend, vol_state)]

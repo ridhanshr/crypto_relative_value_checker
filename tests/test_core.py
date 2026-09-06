@@ -512,7 +512,7 @@ def test_classify_funding_gaps_empty_when_complete():
 
 def test_evaluate_deployable_uses_only_hard_gates():
     from crypto_checker.decision import HARD_GATES, evaluate_deployable
-    assert set(HARD_GATES) == {"wf_positive", "oos_positive", "no_risk_violations", "no_capacity_violations"}
+    assert set(HARD_GATES) == {"wf_positive", "oos_positive", "no_risk_violations", "no_capacity_violations", "reality_check_pass"}
     passing = {name: True for name in HARD_GATES}
     assert evaluate_deployable(passing) is True
     # Informational gates failing must not matter.
@@ -523,3 +523,85 @@ def test_evaluate_deployable_uses_only_hard_gates():
         assert evaluate_deployable(failing) is False
     # Missing keys fail closed.
     assert evaluate_deployable({}) is False
+
+
+def test_infer_periods_per_year_buckets():
+    from crypto_checker.core import infer_periods_per_year
+    daily = pd.date_range("2026-01-01", periods=10, freq="D", tz="UTC")
+    assert infer_periods_per_year(daily) == 365.0
+    hourly = pd.date_range("2026-01-01", periods=100, freq="h", tz="UTC")
+    assert infer_periods_per_year(hourly) == 8760.0
+    four_h = pd.date_range("2026-01-01", periods=100, freq="4h", tz="UTC")
+    assert infer_periods_per_year(four_h) == 2190.0
+    assert infer_periods_per_year(daily[:1]) == 365.0
+
+
+def test_hourly_sharpe_annualizes_with_8760():
+    hours = pd.date_range("2026-01-01", periods=6, freq="h", tz="UTC")
+    rows = []
+    for ts in hours:
+        rows.append([ts, "A", 100.0, 1.0])
+        rows.append([ts, "B", 100.0, -1.0])
+    data = pd.DataFrame(rows, columns=["timestamp", "asset", "price", "signal"])
+    result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0, slippage_rate=0))
+    assert result["metrics"]["periods_per_year"] == 8760.0
+    rets = result["pnl"]["return"].iloc[1:].astype(float)
+    expected = float(rets.mean() / rets.std(ddof=1) * (8760.0 ** 0.5)) if rets.std(ddof=1) else 0.0
+    assert result["metrics"]["sharpe"] == pytest.approx(expected)
+
+
+def test_drawdown_violation_tracks_running_peak():
+    # Equity 100k -> 130k -> 100k: true peak-to-trough drawdown is
+    # 100/130-1 = -23.1%, invisible to a fixed initial-equity peak.
+    data = pd.DataFrame([
+        ["2026-01-01", "A", 100, 2], ["2026-01-01", "B", 100, 1],
+        ["2026-01-02", "A", 130, 2], ["2026-01-02", "B", 100, 1],
+        ["2026-01-03", "A", 100, 2], ["2026-01-03", "B", 100, 1],
+    ], columns=["timestamp", "asset", "price", "signal"])
+    result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0, slippage_rate=0, max_drawdown_limit=0.20))
+    kinds = result["violations"]["type"].tolist()
+    assert "max_drawdown_limit" in kinds
+    assert result["metrics"]["max_drawdown"] == pytest.approx(100 / 130 - 1)
+
+
+def test_regime_labels_have_no_future_leakage():
+    from crypto_checker.validation import regime_labels
+    dates = pd.date_range("2026-01-01", periods=120, freq="D", tz="UTC")
+    prices = list(100 + np.arange(120) * 0.5)
+    data = pd.DataFrame({"timestamp": list(dates) * 1, "asset": ["BTCUSDT"] * 120, "price": prices})
+    full = regime_labels(data)
+    prefix = regime_labels(data.iloc[:60])
+    merged = full.iloc[:60].reset_index(drop=True)
+    assert (merged["regime"] == prefix.reset_index(drop=True)["regime"]).all()
+
+
+def test_benchmarks_include_honest_long_only_and_buy_hold():
+    from crypto_checker.validation import benchmark_suite
+    dates = pd.date_range("2026-01-01", periods=10, freq="D", tz="UTC")
+    rows = []
+    for i, ts in enumerate(dates):
+        rows.append([ts, "BTCUSDT", 100.0 + i])
+        rows.append([ts, "ETHUSDT", 50.0 - i * 0.5])
+        rows.append([ts, "XRPUSDT", 10.0 + (i % 2)])
+    data = pd.DataFrame(rows, columns=["timestamp", "asset", "price"])
+    out = benchmark_suite(data)
+    assert "btc_buy_hold" in out and "eth_buy_hold" in out
+    assert out["btc_buy_hold"]["total_return"] == pytest.approx(109.0 / 100.0 - 1)
+    # Long-only basket must equal the unclipped equal-weight basket.
+    assert out["long_only_equal_weight"]["total_return"] == pytest.approx(out["equal_weight"]["total_return"])
+
+
+def test_signal_executes_next_bar_with_documented_timing():
+    # Signal observed at bar t (info <= close t) must first earn PnL over
+    # t -> t+1, and execution_timestamp must be the following bar.
+    data = pd.DataFrame([
+        ["2026-01-01", "A", 100, 2], ["2026-01-01", "B", 100, 1],
+        ["2026-01-02", "A", 110, -2], ["2026-01-02", "B", 100, -1],
+        ["2026-01-03", "A", 121, -2], ["2026-01-03", "B", 100, -1],
+    ], columns=["timestamp", "asset", "price", "signal"])
+    result = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0, slippage_rate=0))
+    # Day-0 decision (long A) earns the day-0 -> day-1 move: +10% on weight 1.0.
+    assert result["pnl"].iloc[1]["price_pnl"] == pytest.approx(10_000.0)
+    pos = result["positions"]
+    first = pos[pos.timestamp == pos.timestamp.min()].iloc[0]
+    assert first["execution_timestamp"] > first["signal_timestamp"]

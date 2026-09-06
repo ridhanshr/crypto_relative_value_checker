@@ -2,7 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 import json
 import pandas as pd
-from .core import CheckerConfig, check_strategy
+from .core import CheckerConfig, check_strategy, infer_periods_per_year
 from .signals import available_candidates, build_signals
 
 
@@ -16,13 +16,13 @@ def _active_returns(result):
     return pnl["return"].iloc[1:].reset_index(drop=True)
 
 
-def _summarize(returns):
+def _summarize(returns, periods_per_year=365.0):
     if len(returns) < 2:
-        return {"total_return": float((1 + returns).prod() - 1) if len(returns) else 0.0, "periods": int(len(returns)), "sharpe": 0.0, "max_drawdown": 0.0}
+        return {"total_return": float((1 + returns).prod() - 1) if len(returns) else 0.0, "periods": int(len(returns)), "periods_per_year": float(periods_per_year), "sharpe": 0.0, "max_drawdown": 0.0}
     std = returns.std(ddof=1)
     equity = (1 + returns).cumprod()
     drawdown = equity / equity.cummax() - 1
-    return {"total_return": float(equity.iloc[-1] - 1), "periods": int(len(returns)), "annualized_volatility": float(std * 365 ** 0.5), "sharpe": float(returns.mean() / std * 365 ** 0.5) if std else 0.0, "max_drawdown": float(drawdown.min())}
+    return {"total_return": float(equity.iloc[-1] - 1), "periods": int(len(returns)), "periods_per_year": float(periods_per_year), "annualized_volatility": float(std * periods_per_year ** 0.5), "sharpe": float(returns.mean() / std * periods_per_year ** 0.5) if std else 0.0, "max_drawdown": float(drawdown.min())}
 
 
 def _slice(frame, cand, part):
@@ -44,16 +44,20 @@ def walk_forward(data, base_config=None, min_train_days=365, test_days=120, outp
     if not candidates:
         raise ValueError("No signal candidates available")
     dates = sorted(frame["timestamp"].drop_duplicates())
-    if len(dates) < min_train_days + test_days:
+    ppy = infer_periods_per_year(dates)
+    periods_per_day = ppy / 365.0
+    min_train_periods = max(1, int(round(min_train_days * periods_per_day)))
+    test_periods = max(1, int(round(test_days * periods_per_day)))
+    if len(dates) < min_train_periods + test_periods:
         raise ValueError("Insufficient data for walk-forward with the requested windows")
     folds = []
-    cursor = min_train_days
+    cursor = min_train_periods
     folds_data = []
-    while cursor + test_days <= len(dates):
+    while cursor + test_periods <= len(dates):
         train_dates = dates[:cursor]
-        test_dates = dates[cursor:cursor + test_days]
+        test_dates = dates[cursor:cursor + test_periods]
         folds_data.append((train_dates, test_dates))
-        cursor += test_days
+        cursor += test_periods
     fee_stress_pairs = fee_stress_pairs or [(0.0008, 0.001), (0.0015, 0.002)]
     tiered = bool(cfg.liquidity_tiers and cfg.liquidity_column)
     stress_variants = []
@@ -92,9 +96,9 @@ def walk_forward(data, base_config=None, min_train_days=365, test_days=120, outp
             segments["stress"][name].append(stressed)
         choices.append({**best, "fold": index, "train_end": str(train_dates[-1]), "test_start": str(test_dates[0]), "test_end": str(test_dates[-1]), "test_return": float((1 + test_returns).prod() - 1)})
     base_returns = pd.concat(segments["base"], ignore_index=True)
-    stress_summary = {name: _summarize(pd.concat(parts, ignore_index=True)) for name, parts in segments["stress"].items()}
+    stress_summary = {name: _summarize(pd.concat(parts, ignore_index=True), ppy) for name, parts in segments["stress"].items()}
     folds_profitable = int(sum(1 for c in choices if c["test_return"] > 0))
-    result = {"candidates": candidates, "n_folds": len(folds_data), "folds": choices, "walk_forward": _summarize(base_returns), "cost_stress": stress_summary, "folds_profitable": folds_profitable, "state_policy": "fresh_deployment_per_fold; selection-only, live decisions use continuous-equity validation", "gates": {"wf_positive": _summarize(base_returns)["total_return"] > 0, "wf_sharpe_above_one": _summarize(base_returns)["sharpe"] > 1, "wf_drawdown_above_minus_20pct": _summarize(base_returns)["max_drawdown"] > -0.20, "stress_positive": all(x["total_return"] > 0 for x in stress_summary.values()), "majority_folds_profitable": folds_profitable > len(folds_data) / 2}}
+    result = {"candidates": candidates, "n_folds": len(folds_data), "folds": choices, "periods_per_year": float(ppy), "walk_forward": _summarize(base_returns, ppy), "cost_stress": stress_summary, "folds_profitable": folds_profitable, "state_policy": "fresh_deployment_per_fold; selection-only, live decisions use continuous-equity validation", "gates": {"wf_positive": _summarize(base_returns, ppy)["total_return"] > 0, "wf_sharpe_above_one": _summarize(base_returns, ppy)["sharpe"] > 1, "wf_drawdown_above_minus_20pct": _summarize(base_returns, ppy)["max_drawdown"] > -0.20, "stress_positive": all(x["total_return"] > 0 for x in stress_summary.values()), "majority_folds_profitable": folds_profitable > len(folds_data) / 2}}
     result["deployable"] = all(result["gates"].values())
     if output_dir:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
