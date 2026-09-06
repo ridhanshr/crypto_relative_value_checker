@@ -20,6 +20,10 @@ Sistem menghitung:
 
 Sistem **tidak menjamin profit**. `DEPLOYABLE=True` hanya boleh muncul jika seluruh pemeriksaan risiko dan validasi berhasil.
 
+## Flow Visual
+
+![Crypto Relative-Value Checker system flow](quant_pipeline_flow_horizontal_legend.png)
+
 ## Flow Sistem
 
 Alur utama sistem:
