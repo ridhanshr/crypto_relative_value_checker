@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+import json
 from crypto_checker.core import CheckerConfig, check_strategy
 from crypto_checker.signal_audit import audit_signals
 from crypto_checker.validation import run_validation
@@ -1133,6 +1134,76 @@ def test_golden_fixtures_byte_identical():
     import shutil
     shutil.rmtree("reports/.golden_tmp_decision", ignore_errors=True)
     shutil.rmtree("reports/.golden_tmp_validation", ignore_errors=True)
+
+
+def test_api_envelope_success_rejected(tmp_path):
+    # SUCCESS + REJECTED: full evaluation ran, strategy rejected on merit.
+    from crypto_checker.api import validate_csv
+    from crypto_checker.schema import validate_output_schema
+    env = validate_csv("tests/fixtures/small_panel.csv", output_dir=str(tmp_path / "run"),
+                       n_long=1, n_short=1, min_train_days=100, test_days=40,
+                       candidates=["momentum_7", "reversal_1"], ensemble_top_k=2)
+    assert env["status"] == "SUCCESS" and env["decision"] == "REJECTED"
+    assert env["deployable"] is False and env["errors"] == []
+    assert validate_output_schema(env, "result") == []
+    for key in ("wf_total_return", "wf_sharpe", "wf_drawdown", "oos_total_return",
+                "oos_sharpe", "oos_drawdown", "turnover_daily"):
+        assert isinstance(env["metrics"][key], float), key
+    assert env["capacity"]["max_sensible"] is not None
+    assert "Lolos validation criteria" in env["deployable_meaning"] and "BUKAN" in env["deployable_meaning"]
+    on_disk = json.loads((tmp_path / "run" / "decision.json").read_text())
+    assert on_disk["status"] == "SUCCESS" and validate_output_schema(on_disk, "result") == []
+
+
+def test_api_envelope_failed_validation(tmp_path):
+    # FAILED_VALIDATION: decision.json STILL written; metrics/decision null.
+    from crypto_checker.api import validate_csv
+    from crypto_checker.schema import validate_output_schema
+    bad = pd.DataFrame([["2024-01-01", "A", 100, 1]], columns=["timestamp", "asset", "price", "signal"])
+    path = tmp_path / "bad.csv"
+    bad.to_csv(path, index=False)
+    env = validate_csv(str(path), output_dir=str(tmp_path / "run"))
+    assert env["status"] == "FAILED_VALIDATION" and env["decision"] is None
+    assert env["deployable"] is False and env["metrics"] is None and env["capacity"] is None
+    assert env["errors"] and isinstance(env["warnings"], list)
+    assert validate_output_schema(env, "result") == []
+    assert (tmp_path / "run" / "decision.json").exists()
+
+
+def test_api_envelope_checker_error(tmp_path):
+    # CHECKER_ERROR: internal crash becomes data, never a raw traceback.
+    import crypto_checker.api as api_module
+    from crypto_checker.schema import validate_output_schema
+    real = api_module.deployment_decision
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated engine crash")
+    api_module.deployment_decision = boom
+    try:
+        env = api_module.validate_csv("tests/fixtures/small_panel.csv", output_dir=str(tmp_path / "run"),
+                                      n_long=1, n_short=1, min_train_days=100, test_days=40,
+                                      candidates=["momentum_7"], ensemble_top_k=0)
+    finally:
+        api_module.deployment_decision = real
+    assert env["status"] == "CHECKER_ERROR" and env["decision"] is None
+    assert env["deployable"] is False and env["metrics"] is None
+    assert any("CHECKER_ERROR" in e for e in env["errors"])
+    assert validate_output_schema(env, "result") == []
+    assert (tmp_path / "run" / "decision.json").exists()
+
+
+def test_envelope_approved_shape_and_exit_codes():
+    # The fourth state (APPROVED) validated by construction; exit mapping locked.
+    from crypto_checker.schema import validate_output_schema
+    from crypto_checker.api import STATUS_FOR_EXIT
+    approved = {"schema_version": 1, "status": "SUCCESS", "decision": "APPROVED", "deployable": True,
+                "deployable_meaning": "x", "gates": {"wf_positive": True}, "metrics": {
+                    "wf_total_return": 0.52, "wf_sharpe": 0.85, "wf_drawdown": -0.37,
+                    "oos_total_return": -0.04, "oos_sharpe": -0.22, "oos_drawdown": -0.18,
+                    "dsr": 0.175, "turnover_daily": 0.08},
+                "capacity": {"max_sensible": 100000.0, "status": "ok"}, "risk": {}, "data_quality": {},
+                "warnings": [], "errors": [], "artifacts": {}}
+    assert validate_output_schema(approved, "result") == []
+    assert STATUS_FOR_EXIT == {"SUCCESS": 0, "FAILED_VALIDATION": 2, "CHECKER_ERROR": 1}
 
 
 def test_output_schema_contract_v1_locked():

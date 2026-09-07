@@ -216,3 +216,12 @@ Siklus ini dikunci sebagai regression test (`test_system_validation_dirty_detect
 Temuan terpenting selama pembuktian: golden test lintas-proses menangkap nondeterminisme ULP nyata (urutan iterasi `set` mengikuti `PYTHONHASHSEED` per proses) yang lolos dari uji determinisme satu-proses — diperbaiki dengan urutan kanonik `sorted()` di semua agregat `core.py`, lalu dibuktikan stabil di dua `PYTHONHASHSEED` berbeda. Tanpa test ini, Quantara akan menerima angka yang goyang antar run.
 
 Catatan presisi: CSV adalah round-trip lossy di level ULP (terukur maks 2,8e-14) — golden fixture dibangkitkan dari byte CSV yang di-commit (bukan dari memori), sehingga byte-equality menguji mesin murni, bukan presisi I/O.
+
+## 8. Kontrak pra-integrasi Quantara (schema v1.1, aditif — tetap version 1)
+
+Empat keputusan pra-integrasi, semua terimplementasi + ter-test:
+
+1. **Contract freeze:** envelope `decision.json` (`status`, `decision`, `deployable`, `deployable_meaning`, `gates`, `metrics` 8-field, `capacity`, `risk`, `data_quality`, `warnings`, `errors`, `artifacts`) — populasi mengikuti tabel locked: SUCCESS→metrics populated/decision set; FAILED_VALIDATION/CHECKER_ERROR→metrics & capacity null, decision null, errors populated, `deployable` false. Aturan versi: v1.0→v1.1 aditif (version tetap 1); bump ke 2 hanya untuk rename/hapus/ubah-tipe/ubah-semantik.
+2. **Satu entry point resmi:** `validate_csv()` di `crypto_checker/api.py` (+ `python -m crypto_checker.validate`, exit 0/2/1); `cli.py` lama di-guard `main()` agar import-safe tanpa perubahan perilaku. Quantara tidak memanggil internal.
+3. **Tiga keadaan eksplisit:** SUCCESS+APPROVED/REJECTED (REJECTED = ditolak karena merit, bukan error) vs FAILED_VALIDATION (evaluasi tidak selesai) vs CHECKER_ERROR (tanpa klaim riset). `decision.json` selalu ditulis, bahkan di jalur gagal.
+4. **Makna deployable dikunci di kontrak:** "Lolos validation criteria checker. BUKAN izin live trading / real money." Suite 82 test lulus.

@@ -105,19 +105,30 @@ python -m pytest tests -q
 
 Harus 75 passed. Kalau ada yang gagal, jangan lanjut — perbaiki environment dulu.
 
-### 1. Jalan penuh riset + vonis deployment (paling umum)
+### 1. Jalan penuh riset + vonis deployment (ENTRY POINT RESMI)
 
-Satu perintah menjalankan preflight → backtest → validasi → walk-forward → decision:
+Satu-satunya pintu resmi untuk konsumen (termasuk Quantara): `validate_csv()` / `python -m crypto_checker.validate`. Jangan panggil `core.py`, `selection.py`, atau fungsi internal satu per satu — itu detail implementasi yang boleh berubah tanpa pemberitahuan.
 
 ```bash
-python -m crypto_checker.cli ^
+python -m crypto_checker.validate ^
   --input data\midcap_2y_daily_2_funded.csv ^
-  --output reports\hasil_saya ^
-  --research ^
-  --liquidity-column quote_volume --cost-preset midcap
+  --output reports\hasil_saya
 ```
 
-Output utama di folder output: `summary.json` (hasil backtest), `validation.json` (train/val/OOS + gates), `walk_forward/walk_forward.json` (pilihan per fold + DSR + ensemble), `deployment_decision.json` (vonis akhir). Baca `deployable`: `true`/`false` + `gates` mana yang gagal.
+atau dari Python:
+
+```python
+from crypto_checker.api import validate_csv
+envelope = validate_csv("data/midcap_2y_daily_2_funded.csv", output_dir="reports/hasil_saya")
+```
+
+Output utama di folder output: `decision.json` (**selalu ditulis**, atomik, di semua keadaan — inilah satu-satunya file yang perlu dibaca), plus `preflight.json`, `walk_forward.json`, `validation.json`, `capacity_curve.json`, `deployment_decision.json` (detail). Baca `status` + `decision` + `deployable` + `gates` yang gagal.
+
+| status | decision | exit | arti |
+|---|---|---|---|
+| `SUCCESS` | `APPROVED`/`REJECTED` | 0 | evaluasi jalan penuh; REJECTED = ditolak karena merit (gate/DSR), **bukan** error |
+| `FAILED_VALIDATION` | null | 2 | data tak lolos gerbang; `metrics`/`capacity` null, `errors` terisi, `deployable` false |
+| `CHECKER_ERROR` | null | 1 | crash/bug internal; tanpa klaim riset apa pun |
 
 ### 2. Uji satu signal manual
 
@@ -338,9 +349,13 @@ Opsi penting: `--signal` (kolom signal), `--signal-lookback`, `--min-signal-gap`
 - `lifecycle_manifest.csv` (via `write_lifecycle_manifest`): segmen universe untuk kurasi manual.
 - `analysis_summary.json` (analyze_midcap): mode, manifest, forced exits, status spread.
 
-## Kontrak Output (schema v1, untuk integrasi)
+## Kontrak Output (schema v1.1, untuk integrasi)
+
+Aturan versi (beku): **v1.0 → v1.1 = tambah field (backward-compatible), `schema_version` tetap 1.** Naik ke 2 hanya bila rename/hapus field, ubah tipe, atau ubah semantik. Konsumen lama yang membaca field lama tidak pecah oleh v1.1.
 
 Setiap artefak JSON membawa `schema_version: 1`. Aturan: **tambah field = minor (boleh)**; ubah/hapus field terkunci = major (test kontrak gagal sampai versi di-bump). Quantara wajib menjalankan `validate_output_schema(artefak, kind)` pada setiap artefak yang dibaca.
+
+`deployable: true` berarti **"lolos validation criteria checker" — BUKAN izin live trading / real money.** Promosi ke paper/live adalah keputusan Quantara dengan kriteria tersendiri (kalimat ini juga dikunci sebagai `deployable_meaning` di setiap decision).
 
 | Artefak | Field terkunci (tipe) |
 |---|---|
@@ -349,6 +364,7 @@ Setiap artefak JSON membawa `schema_version: 1`. Aturan: **tambah field = minor 
 | `walk_forward.json` (`walk_forward`) | `schema_version, candidates: list, n_folds, folds: list, walk_forward: dict, gates: dict, deployable: bool` (+ opsional `data_mining`, `ensemble`) |
 | `capacity_curve.json` (`capacity`) | `schema_version, status: str, levels: list` (per level: `aum, total_return, sharpe, max_drawdown, capacity_violations, breach_trades, max_participation_ratio, headroom_multiple, sensible: bool`) |
 | `preflight.json` (`preflight`) | `schema_version, valid: bool, errors: list, warnings: list` |
+| `decision.json` (`result`, KANONIK) | `schema_version, status: SUCCESS\|FAILED_VALIDATION\|CHECKER_ERROR, decision: APPROVED\|REJECTED\|null, deployable: bool, deployable_meaning: str, gates: dict, metrics: dict\|null (wf_total_return, wf_sharpe, wf_drawdown, oos_total_return, oos_sharpe, oos_drawdown, dsr\|null, turnover_daily), capacity: dict\|null ({max_sensible\|null, status}), risk: dict, data_quality: dict, warnings: list, errors: list, artifacts: dict` |
 | `analysis_summary.json` (`analysis`, via analyze_midcap) | `schema_version, mode: str, assets: list, preflight: dict, walk_forward: dict, deployable: bool` (divalidasi + ditulis atomik; violation = run gagal) |
 
 ## Arti DEPLOYABLE

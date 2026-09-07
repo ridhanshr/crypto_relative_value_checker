@@ -14,6 +14,21 @@ Every JSON artifact the checker emits carries ``schema_version``. Rules:
 
 SCHEMA_VERSION = 1
 
+# Versioning contract (frozen with Quantara):
+#   v1.0 -> v1.1 : ADD fields (backward-compatible). schema_version stays 1.
+#   v1.x -> v2   : RENAME / REMOVE / TYPE-CHANGE / SEMANTIC-BREAK.
+#                  schema_version becomes 2. This file is currently v1.1.
+SCHEMA_CHANGELOG = [
+    "v1.0: decision, validation, walk_forward, capacity, preflight locked",
+    "v1.1: envelope kind 'result' + 'analysis' added (additive only); "
+    "nullable spec kinds ('str?', 'num?', 'dict?') for explicit nulls",
+]
+
+DEPLOYABLE_MEANING = (
+    "Lolos validation criteria checker. BUKAN izin live trading / real money. "
+    "Promotion to paper/live is Quantara's decision under its own criteria."
+)
+
 
 def _is_num(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -22,24 +37,31 @@ def _is_num(value):
 def _check(mapping, spec, prefix=""):
     errors = []
     for key, kind in spec.items():
+        # Trailing "?" = nullable: explicit null is contract-valid.
+        nullable = kind.endswith("?")
+        base = kind[:-1] if nullable else kind
         label = f"{prefix}{key}"
         if key not in mapping:
             errors.append(f"missing: {label}")
             continue
         value = mapping[key]
-        if kind == "num":
+        if value is None:
+            if not nullable:
+                errors.append(f"null forbidden: {label}")
+            continue
+        if base == "num":
             if not _is_num(value):
                 errors.append(f"bad type {label}: expected number, got {type(value).__name__}")
-        elif kind == "str":
+        elif base == "str":
             if not isinstance(value, str):
                 errors.append(f"bad type {label}: expected str, got {type(value).__name__}")
-        elif kind == "bool":
+        elif base == "bool":
             if not isinstance(value, bool):
                 errors.append(f"bad type {label}: expected bool, got {type(value).__name__}")
-        elif kind == "dict":
+        elif base == "dict":
             if not isinstance(value, dict):
                 errors.append(f"bad type {label}: expected dict, got {type(value).__name__}")
-        elif kind == "list":
+        elif base == "list":
             if not isinstance(value, list):
                 errors.append(f"bad type {label}: expected list, got {type(value).__name__}")
         else:
@@ -99,6 +121,35 @@ SCHEMAS = {
         "walk_forward": "dict",
         "deployable": "bool",
     },
+    # v1.1 envelope: the single canonical artifact Quantara reads.
+    # Population rules (locked):
+    #   SUCCESS+APPROVED/REJECTED: metrics/risk/capacity/data_quality populated, decision set.
+    #   FAILED_VALIDATION / CHECKER_ERROR: metrics/capacity null, decision null, errors populated.
+    "result": {
+        "schema_version": "num",
+        "status": "str",
+        "decision": "str?",
+        "deployable": "bool",
+        "deployable_meaning": "str",
+        "gates": "dict",
+        "metrics": "dict?",
+        "capacity": "dict?",
+        "risk": "dict",
+        "data_quality": "dict",
+        "warnings": "list",
+        "errors": "list",
+        "artifacts": "dict",
+    },
+    "metrics": {
+        "wf_total_return": "num",
+        "wf_sharpe": "num",
+        "wf_drawdown": "num",
+        "oos_total_return": "num",
+        "oos_sharpe": "num",
+        "oos_drawdown": "num",
+        "dsr": "num?",
+        "turnover_daily": "num",
+    },
 }
 
 
@@ -117,4 +168,15 @@ def validate_output_schema(artifact, kind):
                 errors.extend(_check(level, _LEVEL_SPEC, prefix=f"levels[{i}]."))
             else:
                 errors.append(f"levels[{i}]: expected dict, got {type(level).__name__}")
+    if kind == "result":
+        if isinstance(artifact.get("metrics"), dict):
+            errors.extend(_check(artifact["metrics"], SCHEMAS["metrics"], prefix="metrics."))
+        if isinstance(artifact.get("capacity"), dict) and "max_sensible" in artifact["capacity"]:
+            ms = artifact["capacity"]["max_sensible"]
+            if ms is not None and not _is_num(ms):
+                errors.append(f"bad type capacity.max_sensible: expected number|null, got {type(ms).__name__}")
+        if artifact.get("status") not in ("SUCCESS", "FAILED_VALIDATION", "CHECKER_ERROR"):
+            errors.append(f"bad status: {artifact.get('status')!r}")
+        if artifact.get("decision") not in ("APPROVED", "REJECTED", None):
+            errors.append(f"bad decision: {artifact.get('decision')!r}")
     return errors
