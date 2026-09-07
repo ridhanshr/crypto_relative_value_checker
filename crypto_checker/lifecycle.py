@@ -151,6 +151,13 @@ def load_lifecycle_manifest(path):
 def audit_universe_compliance(data, lifecycle):
     """Flag (timestamp, asset) rows trading outside their lifecycle segment.
 
+    Matching is SYMBOL-level, not canonical-level: a row is compliant iff a
+    segment exists for its exact source symbol covering the timestamp. This
+    is what catches mislabeled migration history (GAL prices labeled GUSDT
+    before G lists) -- canonical-level matching would wave it through.
+    ``source_asset`` (kept by canonicalize_assets) is honored when present,
+    else the asset column itself is the source.
+
     Returns DataFrame [timestamp, asset, reason] with reason in
     ("trading_before_listing", "trading_after_delisting",
     "no_lifecycle_segment"). Empty means fully compliant.
@@ -166,18 +173,21 @@ def audit_universe_compliance(data, lifecycle):
     lifecycle = _normalize_lifecycle(lifecycle)
     rows = []
     for _, row in frame.iterrows():
-        ts, canonical = row["timestamp"], row["canonical"]
+        ts, canonical, source = row["timestamp"], row["canonical"], row["source_asset"]
         segs = lifecycle[lifecycle["canonical"] == canonical]
+        asset_label = row["asset"] if "asset" in frame.columns else canonical
         if segs.empty:
-            rows.append({"timestamp": ts, "asset": row["asset"] if "asset" in frame.columns else canonical, "reason": "no_lifecycle_segment"})
+            rows.append({"timestamp": ts, "asset": asset_label, "reason": "no_lifecycle_segment"})
             continue
-        live = segs[(segs["listed_at"] <= ts) & (segs["delisted_at"].isna() | (ts < segs["delisted_at"]))]
+        segs_sym = segs[segs["symbol"].astype(str).str.upper() == source]
+        pool = segs_sym if not segs_sym.empty else segs
+        live = pool[(pool["listed_at"] <= ts) & (pool["delisted_at"].isna() | (ts < pool["delisted_at"]))]
         if live.empty:
-            if (segs["listed_at"] > ts).any():
+            if (pool["listed_at"] > ts).any():
                 reason = "trading_before_listing"
             else:
                 reason = "trading_after_delisting"
-            rows.append({"timestamp": ts, "asset": row["asset"] if "asset" in frame.columns else canonical, "reason": reason})
+            rows.append({"timestamp": ts, "asset": asset_label, "reason": reason})
     return pd.DataFrame(rows, columns=cols)
 
 

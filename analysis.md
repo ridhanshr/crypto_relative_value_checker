@@ -184,7 +184,6 @@ Suite kini **65 test lulus**.
 | Capacity curve | Baik — re-run aktual per AUM, bukan ekstrapolasi; headroom kuantitatif; menolak mengarang likuiditas |
 
 ### 5.3 Kesimpulan recheck
-
 Mesin kini menemukan (low_vol_14 menang 4/5 fold), menguji (gates + DSR +
 capacity + ensemble), dan membunuh (DSR 0,175, OOS negatif) alpha — tanpa
 bergantung pada satu signal. `DEPLOYABLE False` kali ini lebih kuat dari
@@ -192,3 +191,13 @@ sebelumnya: bukan "strategi merugi", melainkan "tidak ada alpha yang survive
 koreksi multiple-testing di universe ini". Fondasi universe/eksekusi/biaya
 terverifikasi; yang kering adalah ruang pencarian. Langkah berikut adalah
 riset signal/universe baru, bukan tuning — 65 trials sudah cukup menjadi bukti.
+
+## 6. Skenario ideal: validasi sistem di data kotor (71-aset) — TERKUNCI
+
+Dataset `midcap_2y_daily_2.csv` (71 aset, mentah) menjalani siklus ideal penuh:
+
+1. **Detect:** preflight ketat menolak — `Duplicate (timestamp, asset)` (668 baris overlap OMNI→NOM) + `Unexplained interior gaps: 17`. Audit vs manifest resmi menangkap korupsi sunyi: histori GAL berlabel GUSDT ter-flag `trading_before_listing` (audit kini symbol-level; pencocokan canonical-level akan meloloskannya).
+2. **Repair** (`scripts/repair_71.py` di atas primitif `crypto_checker/repair.py`): relabel 211 G + 531 NOM pra-cutover, drop 731 stale (MKR 357!), exclude kanonikal NOM (seam −30,2% pasca-faktor resmi tak terverifikasi).
+3. **Verify:** `valid: True`, `errors: []`, 42 hari migration_halt, GRT/THETA 1-hari jadi warning toleransi.
+
+Siklus ini dikunci sebagai regression test (`test_system_validation_dirty_detect_repair_verify`) — bukan sekadar run manual. Argumennya: 47-aset membuktikan engine bekerja pada data bersih; 71-aset membuktikan engine bekerja pada data kotor dan mengidentifikasi masalah nyata. Suite 75 test lulus.

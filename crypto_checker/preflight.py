@@ -6,7 +6,7 @@ from .assets import canonicalize_assets, audit_migration_discontinuities, audit_
 from .lifecycle import build_lifecycle, classify_timestamp_gaps, measure_survivorship_gap, INFERRED
 
 
-def validate_dataset(data, require_funding=False, require_liquidity=False, min_assets=2, min_periods=2, expected_frequency=None, allow_gaps=False, listing_manifest=None):
+def validate_dataset(data, require_funding=False, require_liquidity=False, min_assets=2, min_periods=2, expected_frequency=None, allow_gaps=False, listing_manifest=None, tolerated_gap_days=1):
     errors = []
     warnings = []
     required = {"timestamp", "asset", "price", "signal"}
@@ -118,11 +118,22 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
             halt_detail = "; ".join(f"{r.asset}:{r.gap_start.date()}->{r.gap_end.date()}" for r in halted.itertuples())
             warnings.append(f"Documented exchange halt(s): {int(halted['gap_days'].sum())} non-trading asset-periods ({halt_detail}); positions are force-exited across halts, never carried")
         if not unexplained.empty:
-            gap_detail = "; ".join(f"{r.asset}:{r.gap_days}" for r in unexplained.itertuples())
-            message = f"Unexplained interior gaps: {int(unexplained['gap_days'].sum())} missing asset-periods ({gap_detail[:200]})"
-            (errors if not allow_gaps else warnings).append(message)
-            if allow_gaps:
-                warnings.append("Gap-tolerant exploratory mode: unexplained gaps trigger forced exits in backtest; NOT valid for futures deployment")
+            tiny = unexplained[unexplained["gap_days"] <= tolerated_gap_days]
+            big = unexplained[unexplained["gap_days"] > tolerated_gap_days]
+            # Policy leniency: single-day holes (default) are API hiccups with
+            # bounded impact -- the backtest force-exits across them. They
+            # warn, never fail. Only multi-day unexplained holes can fail a
+            # run (or warn in tolerant mode). Taxonomy is unchanged: both
+            # stay "unexplained_interior" in the classifier.
+            if not tiny.empty:
+                tiny_detail = "; ".join(f"{r.asset}:{r.gap_start.date()}" for r in tiny.itertuples())
+                warnings.append(f"Tolerated {int(tiny['gap_days'].sum())} single-day gap(s) ({tiny_detail}); treated as data hiccups, forced-exit applies if held")
+            if not big.empty:
+                gap_detail = "; ".join(f"{r.asset}:{r.gap_days}" for r in big.itertuples())
+                message = f"Unexplained interior gaps: {int(big['gap_days'].sum())} missing asset-periods ({gap_detail[:200]})"
+                (errors if not allow_gaps else warnings).append(message)
+                if allow_gaps:
+                    warnings.append("Gap-tolerant exploratory mode: unexplained gaps trigger forced exits in backtest; NOT valid for futures deployment")
         elif sum(gaps) and halted.empty:
             message = f"Timestamp gaps detected: {sum(gaps)} missing asset-periods"
             (errors if not allow_gaps else warnings).append(message)

@@ -922,13 +922,30 @@ def test_preflight_strict_passes_documented_halt_fails_unexplained():
     assert strict["gap_classification"]["unexplained_interior_days"] == 0
     assert any("Documented exchange halt" in w for w in strict["warnings"])
     hole = halt_only.copy()
-    hole = hole[~((hole["asset"] == "BTCUSDT") & (hole["timestamp"] == "2024-07-20 00:00:00+00:00") )]
+    hole = hole[~((hole["asset"] == "BTCUSDT") & (hole["timestamp"].isin(["2024-07-20 00:00:00+00:00", "2024-07-21 00:00:00+00:00"])))]
     strict_hole = validate_dataset(hole, min_assets=2, min_periods=2, expected_frequency="D", allow_gaps=False)
     assert not strict_hole["valid"]
     assert any("Unexplained interior gaps" in e for e in strict_hole["errors"])
     tolerant = validate_dataset(hole, min_assets=2, min_periods=2, expected_frequency="D", allow_gaps=True)
     assert tolerant["valid"]
     assert any("NOT valid for futures" in w for w in tolerant["warnings"])
+
+
+def test_single_day_gaps_warn_while_longer_holes_fail():
+    base = [[str(d), "BTCUSDT", 60000.0, 0.0] for d in pd.date_range("2024-01-01", "2024-01-10", freq="D", tz="UTC")]
+    one_day_hole = pd.DataFrame([r for r in base if r[0] != "2024-01-05 00:00:00+00:00"], columns=["timestamp", "asset", "price", "signal"])
+    # Default policy: 1-day hiccup warns, run proceeds.
+    check = validate_dataset(one_day_hole, min_assets=1, min_periods=2, expected_frequency="D", allow_gaps=False)
+    assert check["valid"], check["errors"]
+    assert any("single-day gap" in w for w in check["warnings"])
+    # ...but a 2-day hole still fails strict mode.
+    two_day_hole = pd.DataFrame([r for r in base if r[0] not in ("2024-01-05 00:00:00+00:00", "2024-01-06 00:00:00+00:00")], columns=["timestamp", "asset", "price", "signal"])
+    strict = validate_dataset(two_day_hole, min_assets=1, min_periods=2, expected_frequency="D", allow_gaps=False)
+    assert not strict["valid"]
+    assert any("Unexplained interior gaps" in e for e in strict["errors"])
+    # Old strictness recoverable via tolerated_gap_days=0.
+    zero = validate_dataset(one_day_hole, min_assets=1, min_periods=2, expected_frequency="D", allow_gaps=False, tolerated_gap_days=0)
+    assert not zero["valid"]
 
 
 def test_stress_repeated_forced_exits_across_chaos():
@@ -1013,6 +1030,54 @@ def test_stress_spread_widening_scales_crisis_costs(tmp_path):
     panic_res = check_strategy(data, CheckerConfig(n_long=1, n_short=1, fee_rate=0, slippage_rate=0, liquidity_column="quote_volume", liquidity_tiers=tiers, slippage_mode="spread", spread_csv=str(panic)))
     assert panic_res["pnl"].iloc[0].slippage_cost == pytest.approx(50 * calm_res["pnl"].iloc[0].slippage_cost)
     assert panic_res["metrics"]["total_slippage"] > calm_res["metrics"]["total_slippage"]
+
+
+def test_system_validation_dirty_detect_repair_verify():
+    # The ideal scenario, locked in: a dirty panel must FAIL with identified
+    # problems, and the SAME panel must PASS after repair -- proving the
+    # engine works on dirty data, not just the happy path.
+    from crypto_checker.lifecycle import audit_universe_compliance
+    from crypto_checker.repair import repair_panel, assert_no_residual_duplicates
+    # Real GAL effective date (2024-07-19) so the official 1:60 factor covers
+    # the relabeled rows exactly (2.4/60 = 0.04, zero seam by construction).
+    days = pd.date_range("2024-07-01", "2024-07-31", freq="D", tz="UTC")
+    cutoff = pd.Timestamp("2024-07-19", tz="UTC")
+    rows = [[str(d), "BTCUSDT", 60000.0, 100.0, 0.0] for d in days if d != pd.Timestamp("2024-07-10", tz="UTC")]
+    rows += [[str(d), "GUSDT", 2.4 if d < cutoff else 0.04, 100.0, 0.0] for d in days]
+    rows.append(["2024-07-05 00:00:00+00:00", "GUSDT", 2.4, 0.0, 0.0])  # stale duplicate
+    dirty = pd.DataFrame(rows, columns=["timestamp", "asset", "price", "volume", "signal"])
+    official = pd.DataFrame([
+        {"canonical": "GUSDT", "symbol": "GALUSDT", "listed_at": pd.Timestamp("2024-07-01", tz="UTC"),
+         "delisted_at": cutoff, "event": "migration_source", "source": "official"},
+        {"canonical": "GUSDT", "symbol": "GUSDT", "listed_at": cutoff,
+         "delisted_at": pd.NaT, "event": "migration_target", "source": "official"},
+        {"canonical": "BTCUSDT", "symbol": "BTCUSDT", "listed_at": pd.Timestamp("2019-12-31", tz="UTC"),
+         "delisted_at": pd.NaT, "event": "active", "source": "official"},
+    ])
+    # 1. DETECT: duplicates fail the gate...
+    dirty_check = validate_dataset(dirty, min_assets=2, min_periods=2, expected_frequency="D", allow_gaps=False)
+    assert not dirty_check["valid"]
+    assert any("Duplicate" in e for e in dirty_check["errors"])
+    # ...and the official manifest catches the SILENT corruption (mislabeled
+    # history at the wrong scale produces no gate error by itself).
+    violations = audit_universe_compliance(dirty, official)
+    assert (violations["reason"] == "trading_before_listing").any()
+    # 2. REPAIR via library primitives (relabel + drop stale; the stale dupe
+    # vanishes with the stale rule, nothing silently aggregated).
+    repaired, log = repair_panel(dirty, {"GUSDT": ("GALUSDT", "2024-07-19")}, drop_stale=True)
+    assert log["relabel_migration_history"]["rows"] == 19  # 18 + the stale dupe, which then dies in stale-drop
+    assert log["drop_stale_rows"]["rows"] == 1
+    # 3. VERIFY: same panel now passes strict, compliance is clean.
+    clean_check = validate_dataset(repaired, min_assets=2, min_periods=2, expected_frequency="D", allow_gaps=False)
+    assert clean_check["valid"], clean_check["errors"]
+    assert audit_universe_compliance(repaired, official).empty
+    # Residual non-stale duplicates are a hard refusal, never aggregated.
+    dupes = pd.DataFrame([
+        ["2024-08-01", "A", 100, 10.0], ["2024-08-01", "A", 100, 10.0],
+        ["2024-08-02", "A", 100, 10.0], ["2024-08-02", "B", 100, 10.0],
+    ], columns=["timestamp", "asset", "price", "volume"])
+    with pytest.raises(ValueError, match="REPAIR_REFUSED"):
+        assert_no_residual_duplicates(dupes)
 
 
 def test_listing_manifest_adapter_and_survivorship_gap():
