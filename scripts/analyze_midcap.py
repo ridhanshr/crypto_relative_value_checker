@@ -12,6 +12,8 @@ from crypto_checker.signals import build_signals
 from crypto_checker.core import CheckerConfig, check_strategy, write_reports
 from crypto_checker.selection import walk_forward
 from crypto_checker.spread_check import check_order_book_spread
+from crypto_checker.schema import SCHEMA_VERSION, validate_output_schema
+from crypto_checker.io import atomic_write_json
 
 
 parser = argparse.ArgumentParser(description="Validate and analyze canonical midcap panel")
@@ -63,7 +65,10 @@ for signal in ("low_vol_14", "low_vol_30"):
     write_reports(result, out / signal)
 
 wf = walk_forward(data, base_config=CheckerConfig(**base), candidates=("low_vol_14", "low_vol_30"), n_sides_grid=(3,), min_train_days=365, test_days=120, output_dir=out / "walk_forward", vol_target_annual=0.15)
-summary = {"mode": "futures" if "funding_rate" in data.columns else "price_only", "gap_tolerant": bool(args.allow_gaps), "cost_tiers": tiers, "slippage_mode": slippage_mode, "spread_csv": spread_csv, "assets": symbols, "preflight": preflight, "spread_check_passed": spread is not None, "spread_required_for_deployment": True, "universe_manifest": coverage.astype(str).to_dict("records"), "forced_exit_assets": forced_exit_assets.astype(str).to_dict("records"), "survivorship_note": preflight.get("survivorship_note"), "walk_forward": wf}
+summary = {"schema_version": SCHEMA_VERSION, "mode": "futures" if "funding_rate" in data.columns else "price_only", "gap_tolerant": bool(args.allow_gaps), "cost_tiers": tiers, "slippage_mode": slippage_mode, "spread_csv": spread_csv, "assets": symbols, "preflight": preflight, "spread_check_passed": spread is not None, "spread_required_for_deployment": True, "universe_manifest": coverage.astype(str).to_dict("records"), "forced_exit_assets": forced_exit_assets.astype(str).to_dict("records"), "survivorship_note": preflight.get("survivorship_note"), "walk_forward": wf}
 summary["deployable"] = bool(wf["deployable"] and spread is not None and preflight["valid"])
-(out / "analysis_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+schema_errors = validate_output_schema(summary, "analysis")
+if schema_errors:
+    raise SystemExit(f"SCHEMA_VIOLATION analysis_summary: {schema_errors}")
+atomic_write_json(out / "analysis_summary.json", summary)
 print(json.dumps({"mode": summary["mode"], "assets": len(symbols), "walk_forward_deployable": wf["deployable"], "deployable": summary["deployable"]}, indent=2))

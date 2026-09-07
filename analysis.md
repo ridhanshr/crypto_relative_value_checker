@@ -201,3 +201,18 @@ Dataset `midcap_2y_daily_2.csv` (71 aset, mentah) menjalani siklus ideal penuh:
 3. **Verify:** `valid: True`, `errors: []`, 42 hari migration_halt, GRT/THETA 1-hari jadi warning toleransi.
 
 Siklus ini dikunci sebagai regression test (`test_system_validation_dirty_detect_repair_verify`) — bukan sekadar run manual. Argumennya: 47-aset membuktikan engine bekerja pada data bersih; 71-aset membuktikan engine bekerja pada data kotor dan mengidentifikasi masalah nyata. Suite 75 test lulus.
+
+## 7. Scoreboard stabilitas integrasi (L1–L5) — INTEGRATION_READY
+
+| Level | Syarat | Hasil |
+|---|---|---|
+| L1 Functional | 100% test pass | 78/78 ✅ |
+| L2 Deterministic | 2 run identik | 5 run identik lintas proses (2 determinism + 3 burn-in, SHA256 sama) ✅ |
+| L3 Schema | schema v1 + contract test | `schema_version: 1` di 5 artefak + validator + tabel kontrak README ✅ |
+| L4 Regression | golden fixture CI | fixture sintetis byte-identik lintas proses + hash SHA256; benchmark 47/71 via `benchmark/*/` (hash + regenerasi, tanpa data di git) ✅ |
+| L5 Runtime | 100 small + 3 full | 100/100 (5 syarat per run, slowest 0,38s) + 3/3 identik ✅ |
+| Artifact integrity | atomic write + parse validation | fsync + rename atomik di semua writer + crash test ✅ |
+
+Temuan terpenting selama pembuktian: golden test lintas-proses menangkap nondeterminisme ULP nyata (urutan iterasi `set` mengikuti `PYTHONHASHSEED` per proses) yang lolos dari uji determinisme satu-proses — diperbaiki dengan urutan kanonik `sorted()` di semua agregat `core.py`, lalu dibuktikan stabil di dua `PYTHONHASHSEED` berbeda. Tanpa test ini, Quantara akan menerima angka yang goyang antar run.
+
+Catatan presisi: CSV adalah round-trip lossy di level ULP (terukur maks 2,8e-14) — golden fixture dibangkitkan dari byte CSV yang di-commit (bukan dari memori), sehingga byte-equality menguji mesin murni, bukan presisi I/O.

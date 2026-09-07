@@ -1080,6 +1080,101 @@ def test_system_validation_dirty_detect_repair_verify():
         assert_no_residual_duplicates(dupes)
 
 
+def test_atomic_write_never_leaves_torn_file(tmp_path):
+    import json
+    from crypto_checker.io import atomic_write_json
+    target = tmp_path / "decision.json"
+    atomic_write_json(target, {"schema_version": 1, "deployable": False})
+    assert json.loads(target.read_text()) == {"schema_version": 1, "deployable": False}
+    # Simulated crash during serialization: original must survive intact,
+    # and no temp leftovers may remain.
+    import crypto_checker.io as io_module
+    real_dumps = json.dumps
+    def exploding_dumps(*args, **kwargs):
+        raise RuntimeError("simulated crash mid-write")
+    io_module.json.dumps = exploding_dumps
+    try:
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            atomic_write_json(target, {"schema_version": 1})
+    finally:
+        io_module.json.dumps = real_dumps
+    assert json.loads(target.read_text()) == {"schema_version": 1, "deployable": False}
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_golden_fixtures_byte_identical():
+    # L4: the committed golden outputs must reproduce byte-for-byte.
+    # Any engine change that moves a single digit fails here loudly --
+    # refactor safely, update goldens only deliberately (and review diff).
+    import hashlib
+    from pathlib import Path
+    from crypto_checker.decision import deployment_decision
+    from crypto_checker.validation import run_validation
+    from crypto_checker.signals import build_signals
+    fix = Path("tests/fixtures")
+    data = pd.read_csv(fix / "small_panel.csv")
+    decision = deployment_decision(
+        data, output_dir="reports/.golden_tmp_decision",
+        min_train_days=100, test_days=40, candidates=["momentum_7", "reversal_1"],
+        n_sides_grid=(1,), vol_target_annual=0.0, ensemble_top_k=2,
+    )
+    val = run_validation(
+        build_signals(data).dropna(subset=["momentum_7"]).reset_index(drop=True),
+        CheckerConfig(n_long=1, n_short=1, signal_column="momentum_7"),
+        output_dir="reports/.golden_tmp_validation",
+    )
+    assert decision["deployable"] is False
+    for fresh, golden in (
+        (Path("reports/.golden_tmp_decision/deployment_decision.json"), fix / "expected" / "decision.json"),
+        (Path("reports/.golden_tmp_validation/validation.json"), fix / "expected" / "validation.json"),
+    ):
+        digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+        assert digest(fresh) == digest(golden), f"golden drift: {golden.name}"
+    import shutil
+    shutil.rmtree("reports/.golden_tmp_decision", ignore_errors=True)
+    shutil.rmtree("reports/.golden_tmp_validation", ignore_errors=True)
+
+
+def test_output_schema_contract_v1_locked():
+    # L3: every artifact carries schema_version=1 and passes the validator.
+    # ADDING fields is minor (allowed); REMOVING/RE-TYPING locked fields
+    # fails until SCHEMA_VERSION is bumped.
+    from crypto_checker.schema import SCHEMA_VERSION, validate_output_schema
+    from crypto_checker.validation import run_validation
+    from crypto_checker.capacity import capacity_curve
+    assert SCHEMA_VERSION == 1
+    wdays = pd.date_range("2024-01-01", periods=80, freq="D", tz="UTC")
+    rows = []
+    for d in wdays:
+        rows.append([str(d), "A", 100, 2, 10_000_000.0])
+        rows.append([str(d), "B", 100, 1, 10_000_000.0])
+    data = pd.DataFrame(rows, columns=["timestamp", "asset", "price", "signal", "quote_volume"])
+    cfg = CheckerConfig(n_long=1, n_short=1, liquidity_column="quote_volume", liquidity_tiers=((0.0, 0.0, 0.0),))
+    pre = validate_dataset(data, expected_frequency="D")
+    assert validate_output_schema(pre, "preflight") == []
+    val = run_validation(data, CheckerConfig(n_long=1, n_short=1))
+    assert validate_output_schema(val, "validation") == []
+    wf = walk_forward(data, base_config=cfg, min_train_days=65, test_days=10, candidates=["reversal_1"], n_sides_grid=(1,))
+    assert validate_output_schema(wf, "walk_forward") == []
+    cap = capacity_curve(data, base_config=cfg)
+    assert validate_output_schema(cap, "capacity") == []
+    # Negative: removal, re-type, version drift all fail...
+    broken = dict(val)
+    del broken["gates"]
+    assert any("missing: gates" in e for e in validate_output_schema(broken, "validation"))
+    retyped = dict(val)
+    retyped["gates"] = "all good"
+    assert any("bad type gates" in e for e in validate_output_schema(retyped, "validation"))
+    drifted = dict(val)
+    drifted["schema_version"] = 999
+    assert any("schema_version" in e for e in validate_output_schema(drifted, "validation"))
+    # ...while ADDING a field stays minor (validator ignores unknown keys).
+    extended = dict(val)
+    extended["quantara_note"] = "new minor field"
+    assert validate_output_schema(extended, "validation") == []
+    assert validate_output_schema({}, "no_such_kind") != []
+
+
 def test_listing_manifest_adapter_and_survivorship_gap():
     from crypto_checker.lifecycle import lifecycle_from_listing_manifest, measure_survivorship_gap, active_assets
     manifest = pd.DataFrame([

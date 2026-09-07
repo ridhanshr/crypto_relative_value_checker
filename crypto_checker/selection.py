@@ -5,6 +5,8 @@ import pandas as pd
 from .core import CheckerConfig, check_strategy, infer_periods_per_year
 from .signals import available_candidates, build_signals
 from .reality_check import deflated_sharpe_ratio
+from .schema import SCHEMA_VERSION
+from .io import atomic_write_json
 
 
 N_SIDES_GRID = (2, 3, 4)
@@ -139,7 +141,7 @@ def walk_forward(data, base_config=None, min_train_days=365, test_days=120, outp
     base_returns = pd.concat(segments["base"], ignore_index=True)
     stress_summary = {name: _summarize(pd.concat(parts, ignore_index=True), ppy) for name, parts in segments["stress"].items()}
     folds_profitable = int(sum(1 for c in choices if c["test_return"] > 0))
-    result = {"candidates": candidates, "n_folds": len(folds_data), "folds": choices, "periods_per_year": float(ppy), "walk_forward": _summarize(base_returns, ppy), "cost_stress": stress_summary, "folds_profitable": folds_profitable, "state_policy": "fresh_deployment_per_fold; selection-only, live decisions use continuous-equity validation", "gates": {"wf_positive": _summarize(base_returns, ppy)["total_return"] > 0, "wf_sharpe_above_one": _summarize(base_returns, ppy)["sharpe"] > 1, "wf_drawdown_above_minus_20pct": _summarize(base_returns, ppy)["max_drawdown"] > -0.20, "stress_positive": all(x["total_return"] > 0 for x in stress_summary.values()), "majority_folds_profitable": folds_profitable > len(folds_data) / 2}}
+    result = {"schema_version": SCHEMA_VERSION, "candidates": candidates, "n_folds": len(folds_data), "folds": choices, "periods_per_year": float(ppy), "walk_forward": _summarize(base_returns, ppy), "cost_stress": stress_summary, "folds_profitable": folds_profitable, "state_policy": "fresh_deployment_per_fold; selection-only, live decisions use continuous-equity validation", "gates": {"wf_positive": _summarize(base_returns, ppy)["total_return"] > 0, "wf_sharpe_above_one": _summarize(base_returns, ppy)["sharpe"] > 1, "wf_drawdown_above_minus_20pct": _summarize(base_returns, ppy)["max_drawdown"] > -0.20, "stress_positive": all(x["total_return"] > 0 for x in stress_summary.values()), "majority_folds_profitable": folds_profitable > len(folds_data) / 2}}
     result["deployable"] = all(result["gates"].values())
     # Deflated Sharpe Ratio: correct the selected-path OOS Sharpe for the
     # number of configurations tried (data-mining bias). Informational:
@@ -168,5 +170,5 @@ def walk_forward(data, base_config=None, min_train_days=365, test_days=120, outp
         result["ensemble"] = {"top_k": int(ensemble_top_k), "members_per_fold": ensemble_members, "ensemble": ens_summary, "gates": {"ens_positive": ens_summary["total_return"] > 0, "ens_sharpe_above_one": ens_summary["sharpe"] > 1, "ens_drawdown_above_minus_20pct": ens_summary["max_drawdown"] > -0.20}, "note": "diagnostic_only; ensemble membership is selected per fold, so this is not an unbiased estimate and never enters the deployable verdict"}
     if output_dir:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        Path(output_dir, "walk_forward.json").write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+        atomic_write_json(Path(output_dir, "walk_forward.json"), result)
     return result

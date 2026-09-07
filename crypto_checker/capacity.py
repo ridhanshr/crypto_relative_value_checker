@@ -24,6 +24,8 @@ import pandas as pd
 
 from .core import CheckerConfig, check_strategy
 from .assets import canonical_asset
+from .schema import SCHEMA_VERSION
+from .io import atomic_write_json
 
 DEFAULT_AUM_LEVELS = (10_000.0, 100_000.0, 1_000_000.0, 10_000_000.0)
 
@@ -35,7 +37,7 @@ def capacity_curve(data, base_config=None, aum_levels=None, signal_column=None, 
     levels = tuple(aum_levels or DEFAULT_AUM_LEVELS)
     liq_col = base.liquidity_column
     if not liq_col or liq_col not in data.columns:
-        return {"status": "no_liquidity_data", "liquidity_column": liq_col, "note": "capacity needs a volume column; refusing to invent liquidity"}
+        return {"schema_version": SCHEMA_VERSION, "status": "no_liquidity_data", "liquidity_column": liq_col, "note": "capacity needs a volume column; refusing to invent liquidity"}
     volume = data[["timestamp", "asset", liq_col]].copy()
     volume["timestamp"] = pd.to_datetime(volume["timestamp"], utc=True)
     # Trades carry canonical names (core maps MATIC->POL etc.); map volume
@@ -72,10 +74,9 @@ def capacity_curve(data, base_config=None, aum_levels=None, signal_column=None, 
             # (independent of whether the core run had tiered costs enabled).
             "sensible": bool(breach_trades == 0),
         })
-    report = {"status": "ok", "liquidity_column": liq_col, "max_volume_participation": limit, "levels": rows}
+    report = {"schema_version": SCHEMA_VERSION, "status": "ok", "liquidity_column": liq_col, "max_volume_participation": limit, "levels": rows}
     if output_dir:
         from pathlib import Path
-        import json
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        Path(output_dir, "capacity_curve.json").write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+        atomic_write_json(Path(output_dir, "capacity_curve.json"), report)
     return report

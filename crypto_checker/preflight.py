@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 from .assets import canonicalize_assets, audit_migration_discontinuities, audit_migration_collisions, classify_funding_gaps
 from .lifecycle import build_lifecycle, classify_timestamp_gaps, measure_survivorship_gap, INFERRED
+from .schema import SCHEMA_VERSION
+from .io import atomic_write_json
 
 
 def validate_dataset(data, require_funding=False, require_liquidity=False, min_assets=2, min_periods=2, expected_frequency=None, allow_gaps=False, listing_manifest=None, tolerated_gap_days=1):
@@ -13,10 +15,10 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
     missing = sorted(required - set(data.columns))
     if missing:
         errors.append(f"Missing columns: {missing}")
-        return {"valid": False, "errors": errors, "warnings": warnings}
+        return {"valid": False, "schema_version": SCHEMA_VERSION, "errors": errors, "warnings": warnings}
     frame = data.copy()
     if frame.empty:
-        return {"valid": False, "errors": ["Dataset is empty"], "warnings": []}
+        return {"valid": False, "schema_version": SCHEMA_VERSION, "errors": ["Dataset is empty"], "warnings": []}
     try:
         raw_ts = pd.to_datetime(frame["timestamp"], utc=True, errors="raise")
         raw_asset = frame["asset"].astype(str).str.upper()
@@ -161,10 +163,10 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
         if survivorship_gap["n_missing_dead"]:
             sample = ",".join(survivorship_gap["missing_dead"][:15])
             warnings.append(f"SURVIVORSHIP_GAP: {survivorship_gap['n_missing_dead']} dead-in-window assets absent from dataset (e.g. {sample}); cross-sectional returns exclude their crashes (coverage {survivorship_gap['coverage_ratio']:.2f})")
-    return {"valid": not errors, "errors": errors, "warnings": warnings, "rows": int(len(frame)), "assets": assets, "periods": periods, "start": str(frame["timestamp"].min()), "end": str(frame["timestamp"].max()), "funding_present": "funding_rate" in frame.columns, "liquidity_present": "quote_volume" in frame.columns, "funding_gap_summary": funding_gap_summary, "gap_classification": gap_classification if expected_frequency else {}, "survivorship_gap": survivorship_gap, "universe_membership": membership.to_dict("records"), "asset_status": statuses.astype(str).to_dict("records"), "delisting_suspects": suspects.astype(str).to_dict("records"), "lifecycle_manifest": lifecycle.astype(str).to_dict("records"), "lifecycle_segments": int(len(lifecycle)), "survivorship_note": "Universe berasal dari simbol yang tersedia saat ini; tanpa verifikasi point-in-time membership independen, hasil IC/return berpotensi bias survivorship yang belum terukur."}
+    return {"valid": not errors, "schema_version": SCHEMA_VERSION, "errors": errors, "warnings": warnings, "rows": int(len(frame)), "assets": assets, "periods": periods, "start": str(frame["timestamp"].min()), "end": str(frame["timestamp"].max()), "funding_present": "funding_rate" in frame.columns, "liquidity_present": "quote_volume" in frame.columns, "funding_gap_summary": funding_gap_summary, "gap_classification": gap_classification if expected_frequency else {}, "survivorship_gap": survivorship_gap, "universe_membership": membership.to_dict("records"), "asset_status": statuses.astype(str).to_dict("records"), "delisting_suspects": suspects.astype(str).to_dict("records"), "lifecycle_manifest": lifecycle.astype(str).to_dict("records"), "lifecycle_segments": int(len(lifecycle)), "survivorship_note": "Universe berasal dari simbol yang tersedia saat ini; tanpa verifikasi point-in-time membership independen, hasil IC/return berpotensi bias survivorship yang belum terukur."}
 
 
 def write_preflight(result, output_dir):
     path = Path(output_dir)
     path.mkdir(parents=True, exist_ok=True)
-    (path / "preflight.json").write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+    atomic_write_json(path / "preflight.json", result)

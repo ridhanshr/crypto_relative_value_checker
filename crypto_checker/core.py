@@ -4,6 +4,7 @@ import json
 import numpy as np
 import pandas as pd
 from .assets import canonicalize_assets, audit_migration_collisions, classify_funding_gaps
+from .io import atomic_write_json
 
 
 @dataclass(frozen=True)
@@ -233,8 +234,13 @@ def check_strategy(data, config=None):
             positions = carry.copy()
         else:
             w = cfg.gross_exposure / 2 * vol_scale
-            positions = {a: w / cfg.n_long for a in set(longs.asset)}
-            positions.update({a: -w / cfg.n_short for a in set(shorts.asset)})
+            # Sorted construction: dict insertion order feeds every downstream
+            # sum/loop, so unordered construction would make results depend on
+            # per-process hash randomization (PYTHONHASHSEED) at ULP level.
+            positions = {a: w / cfg.n_long for a in sorted(set(longs.asset))}
+            positions.update({a: -w / cfg.n_short for a in sorted(set(shorts.asset))})
+        # Same reason: one canonical order for every cross-position aggregate.
+        traded = sorted(set(positions) | set(prev_positions))
         long_assets = {a for a, v in positions.items() if v > 0}
         short_assets = {a for a, v in positions.items() if v < 0}
         overlap = long_assets & short_assets
@@ -244,10 +250,10 @@ def check_strategy(data, config=None):
         current_prices = dict(zip(cross.asset, cross.price))
         for asset, weight in positions.items():
             position_rows.append({"signal_timestamp": ts, "execution_timestamp": next_ts, "timestamp": ts, "asset": asset, "weight": weight, "price": current_prices[asset]})
-        turnover_notional = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) for a in set(positions) | set(prev_positions)) * equity
+        turnover_notional = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) for a in traded) * equity
         if cfg.liquidity_tiers and cfg.liquidity_column and cfg.liquidity_column in cross:
             volumes = dict(zip(cross.asset, cross[cfg.liquidity_column]))
-            for asset in set(positions) | set(prev_positions):
+            for asset in traded:
                 change_notional = abs(positions.get(asset, 0) - prev_positions.get(asset, 0)) * equity
                 if asset in volumes and (not np.isfinite(volumes[asset]) or volumes[asset] <= 0):
                     raise ValueError(f"Invalid liquidity value for {asset} at {ts}")
@@ -263,8 +269,8 @@ def check_strategy(data, config=None):
         if tiered_costs:
             fee_rates = dict(zip(cross.asset, cross["_fee_rate"]))
             slip_rates = dict(zip(cross.asset, cross["_slip_rate"]))
-            fee = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) * equity * fee_rates.get(a, cfg.fee_rate) for a in set(positions) | set(prev_positions)) * cfg.cost_multiplier
-            slippage = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) * equity * slip_rates.get(a, cfg.slippage_rate) for a in set(positions) | set(prev_positions)) * cfg.cost_multiplier
+            fee = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) * equity * fee_rates.get(a, cfg.fee_rate) for a in traded) * cfg.cost_multiplier
+            slippage = sum(abs(positions.get(a, 0) - prev_positions.get(a, 0)) * equity * slip_rates.get(a, cfg.slippage_rate) for a in traded) * cfg.cost_multiplier
         else:
             fee = turnover_notional * cfg.fee_rate * cfg.cost_multiplier
             slippage = turnover_notional * cfg.slippage_rate * cfg.cost_multiplier
@@ -281,7 +287,7 @@ def check_strategy(data, config=None):
         if cfg.enforce_risk_limits and violation_rows and violation_rows[-1]["timestamp"] == ts:
             raise RuntimeError(f"Risk limit breached at {ts}: {violation_rows[-1]['type']}")
         pnl_rows.append({"timestamp": ts, "price_pnl": price_pnl, "funding_pnl": funding, "fee_cost": fee, "slippage_cost": slippage, "total_pnl": total, "equity": equity, "return": total / (equity - total) if equity != total else 0, "turnover": turnover_notional / (equity - total) if equity != total else 0})
-        for asset in set(positions) | set(prev_positions):
+        for asset in traded:
             change = positions.get(asset, 0) - prev_positions.get(asset, 0)
             if change:
                 trade_rows.append({"timestamp": ts, "asset": asset, "weight_change": change, "notional": abs(change) * (equity - total)})
@@ -312,4 +318,4 @@ def write_reports(result, output_dir):
             frame.to_csv(Path(output_dir) / f"{name}.csv", index=False)
     summary = result.get("metrics", {})
     summary["latest"] = {name: frame.tail(1).to_dict("records") for name, frame in result.items() if isinstance(frame, pd.DataFrame) and not frame.empty}
-    (Path(output_dir) / "summary.json").write_text(json.dumps(summary, default=str, indent=2), encoding="utf-8")
+    atomic_write_json(Path(output_dir) / "summary.json", summary)

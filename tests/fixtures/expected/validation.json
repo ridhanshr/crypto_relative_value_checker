@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "splits": {
+    "train": {
+      "start": "2024-01-09 00:00:00+00:00",
+      "end": "2024-05-02 00:00:00+00:00",
+      "periods": 115
+    },
+    "validation": {
+      "start": "2024-05-03 00:00:00+00:00",
+      "end": "2024-06-09 00:00:00+00:00",
+      "periods": 38
+    },
+    "out_of_sample": {
+      "start": "2024-06-10 00:00:00+00:00",
+      "end": "2024-07-18 00:00:00+00:00",
+      "periods": 39
+    }
+  },
+  "performance": {
+    "train": {
+      "initial_equity": 100000.0,
+      "final_equity": 94712.35742458826,
+      "total_return": -0.05287642575411733,
+      "periods": 114,
+      "periods_per_year": 365.0,
+      "annualized_return": -0.15965063366825238,
+      "annualized_volatility": 0.5220320198603436,
+      "sharpe": -0.07421408868365656,
+      "max_drawdown": -0.2147724987731776,
+      "winning_periods": 57,
+      "losing_periods": 57,
+      "average_turnover": 0.9298245614035088,
+      "turnover_flag": "OVER",
+      "turnover_note": "average_turnover is fraction of equity turned over per period; academic survival threshold is ~50%/month one-sided (~0.023/day); OVER means turnover alone can dominate net returns",
+      "risk_violations": 3,
+      "capacity_violations": 0,
+      "forced_exits": 0
+    },
+    "validation": {
+      "initial_equity": 94712.35742458826,
+      "final_equity": 58357.19903905914,
+      "total_return": -0.3838480993831853,
+      "periods": 38,
+      "periods_per_year": 365.0,
+      "annualized_return": -0.9904523629446907,
+      "annualized_volatility": 0.5447745819947893,
+      "sharpe": -8.215763909228283,
+      "max_drawdown": -0.3838480993831853,
+      "winning_periods": 13,
+      "losing_periods": 25,
+      "average_turnover": 1.1578947368421053,
+      "turnover_flag": "OVER",
+      "turnover_note": "average_turnover is fraction of equity turned over per period; academic survival threshold is ~50%/month one-sided (~0.023/day); OVER means turnover alone can dominate net returns",
+      "risk_violations": 23,
+      "capacity_violations": 0,
+      "forced_exits": 0
+    },
+    "out_of_sample": {
+      "initial_equity": 58357.19903905914,
+      "final_equity": 62135.19552246022,
+      "total_return": 0.06473916749966757,
+      "periods": 39,
+      "periods_per_year": 365.0,
+      "annualized_return": 0.7987412487579155,
+      "annualized_volatility": 0.5513632811270323,
+      "sharpe": 1.334275129536167,
+      "max_drawdown": -0.11000121297716736,
+      "winning_periods": 21,
+      "losing_periods": 18,
+      "average_turnover": 1.0256410256410255,
+      "turnover_flag": "OVER",
+      "turnover_note": "average_turnover is fraction of equity turned over per period; academic survival threshold is ~50%/month one-sided (~0.023/day); OVER means turnover alone can dominate net returns",
+      "risk_violations": 40,
+      "capacity_violations": 0,
+      "forced_exits": 0
+    }
+  },
+  "risk_violations": {
+    "train": 3,
+    "validation": 23,
+    "out_of_sample": 40
+  },
+  "cost_stress": {
+    "fee_0.0004_slippage_0.0005": {
+      "initial_equity": 100000.0,
+      "final_equity": 112914.77797070786,
+      "total_return": 0.12914777970707858,
+      "periods": 37,
+      "periods_per_year": 365.0,
+      "annualized_return": 2.3142049718309874,
+      "annualized_volatility": 0.5437336766437381,
+      "sharpe": 2.504523883570114,
+      "max_drawdown": -0.07337778693981234,
+      "winning_periods": 21,
+      "losing_periods": 16,
+      "total_fees": 1545.9464955362682,
+      "total_slippage": 1932.4331194203355,
+      "average_turnover": 0.972972972972973,
+      "capacity_violations": 0,
+      "funding_warnings": 0
+    },
+    "fee_0.0008_slippage_0.001": {
+      "initial_equity": 100000.0,
+      "final_equity": 109144.6232196313,
+      "total_return": 0.09144623219631298,
+      "periods": 37,
+      "periods_per_year": 365.0,
+      "annualized_return": 1.3707622731034044,
+      "annualized_volatility": 0.5405091819233471,
+      "sharpe": 1.928130719492211,
+      "max_drawdown": -0.07602523431562158,
+      "winning_periods": 21,
+      "losing_periods": 16,
+      "total_fees": 3042.5974799044516,
+      "total_slippage": 3803.2468498805647,
+      "average_turnover": 0.972972972972973,
+      "capacity_violations": 0,
+      "funding_warnings": 0
+    },
+    "fee_0.0012_slippage_0.002": {
+      "initial_equity": 100000.0,
+      "final_equity": 103513.47932992224,
+      "total_return": 0.03513479329922231,
+      "periods": 37,
+      "periods_per_year": 365.0,
+      "annualized_return": 0.4058612347425019,
+      "annualized_volatility": 0.537067187008582,
+      "sharpe": 1.0147392762539267,
+      "max_drawdown": -0.08894832910106598,
+      "winning_periods": 20,
+      "losing_periods": 17,
+      "total_fees": 4451.758706690123,
+      "total_slippage": 7419.597844483541,
+      "average_turnover": 0.972972972972973,
+      "capacity_violations": 0,
+      "funding_warnings": 0
+    },
+    "fee_0.0008_slippage_0.002": {
+      "initial_equity": 100000.0,
+      "final_equity": 105093.96911379568,
+      "total_return": 0.05093969113795693,
+      "periods": 37,
+      "periods_per_year": 365.0,
+      "annualized_return": 0.6325332167908453,
+      "annualized_volatility": 0.5378531828946849,
+      "sharpe": 1.2773694468094299,
+      "max_drawdown": -0.08527086190036803,
+      "winning_periods": 20,
+      "losing_periods": 17,
+      "total_fees": 2988.9631911525917,
+      "total_slippage": 7472.4079778814785,
+      "average_turnover": 0.972972972972973,
+      "capacity_violations": 0,
+      "funding_warnings": 0
+    },
+    "fee_0.0015_slippage_0.004": {
+      "initial_equity": 100000.0,
+      "final_equity": 94849.10968815033,
+      "total_return": -0.05150890311849665,
+      "periods": 37,
+      "periods_per_year": 365.0,
+      "annualized_return": -0.4064788485921099,
+      "annualized_volatility": 0.5356476425669084,
+      "sharpe": -0.507474728841051,
+      "max_drawdown": -0.117355247304615,
+      "winning_periods": 20,
+      "losing_periods": 17,
+      "total_fees": 5343.617026326898,
+      "total_slippage": 14249.645403538394,
+      "average_turnover": 0.972972972972973,
+      "capacity_violations": 0,
+      "funding_warnings": 0
+    }
+  },
+  "benchmarks": {
+    "equal_weight": {
+      "total_return": 0.10358579474179663,
+      "periods": 38
+    },
+    "btcusdt": {
+      "total_return": 0.0,
+      "periods": 0
+    },
+    "ethusdt": {
+      "total_return": 0.0,
+      "periods": 0
+    },
+    "long_only_equal_weight": {
+      "total_return": 0.10358579474179663,
+      "periods": 38
+    },
+    "btc_buy_hold": {
+      "total_return": 0.0,
+      "periods": 0
+    },
+    "eth_buy_hold": {
+      "total_return": 0.0,
+      "periods": 0
+    },
+    "market_neutral_random_reference": {
+      "total_return": 0.0,
+      "periods": 38,
+      "note": "zero-return theoretical neutral reference"
+    }
+  },
+  "regimes": [],
+  "reality_check": {
+    "signals": 0,
+    "best_ic_tstat": 0.0,
+    "bonferroni_alpha": 0.05,
+    "pass": false
+  },
+  "continuous_equity": true,
+  "survivorship_note": "Universe berasal dari simbol yang tersedia saat ini; tanpa verifikasi point-in-time membership independen, hasil IC/return berpotensi bias survivorship yang belum terukur.",
+  "gates": {
+    "train_positive": false,
+    "validation_positive": false,
+    "oos_positive": true,
+    "oos_sharpe_above_one": true,
+    "oos_drawdown_above_minus_20pct": true,
+    "stress_positive": false,
+    "no_risk_violations": false,
+    "no_capacity_violations": true
+  },
+  "deployable": false
+}

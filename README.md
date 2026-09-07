@@ -338,6 +338,19 @@ Opsi penting: `--signal` (kolom signal), `--signal-lookback`, `--min-signal-gap`
 - `lifecycle_manifest.csv` (via `write_lifecycle_manifest`): segmen universe untuk kurasi manual.
 - `analysis_summary.json` (analyze_midcap): mode, manifest, forced exits, status spread.
 
+## Kontrak Output (schema v1, untuk integrasi)
+
+Setiap artefak JSON membawa `schema_version: 1`. Aturan: **tambah field = minor (boleh)**; ubah/hapus field terkunci = major (test kontrak gagal sampai versi di-bump). Quantara wajib menjalankan `validate_output_schema(artefak, kind)` pada setiap artefak yang dibaca.
+
+| Artefak | Field terkunci (tipe) |
+|---|---|
+| `deployment_decision.json` (`decision`) | `schema_version, best_signal_walk_forward: str, best_n_sides, gates: dict, hard_gates: list, deployable: bool, walk_forward: dict, validation_best_signal: dict, reality_check: dict` |
+| `validation.json` (`validation`) | `schema_version, splits: dict, performance: dict, gates: dict, regimes: list, continuous_equity: bool` |
+| `walk_forward.json` (`walk_forward`) | `schema_version, candidates: list, n_folds, folds: list, walk_forward: dict, gates: dict, deployable: bool` (+ opsional `data_mining`, `ensemble`) |
+| `capacity_curve.json` (`capacity`) | `schema_version, status: str, levels: list` (per level: `aum, total_return, sharpe, max_drawdown, capacity_violations, breach_trades, max_participation_ratio, headroom_multiple, sensible: bool`) |
+| `preflight.json` (`preflight`) | `schema_version, valid: bool, errors: list, warnings: list` |
+| `analysis_summary.json` (`analysis`, via analyze_midcap) | `schema_version, mode: str, assets: list, preflight: dict, walk_forward: dict, deployable: bool` (divalidasi + ditulis atomik; violation = run gagal) |
+
 ## Arti DEPLOYABLE
 
 `DEPLOYABLE=True` berarti lolos semua gate, **bukan** jaminan profit. Vonis hanya memakai 5 hard gate — `wf_positive`, `oos_positive`, `no_risk_violations`, `no_capacity_violations`, `reality_check_pass` (IC terbaik lolos koreksi multiple-testing) — gate lain informasional. Satu hard gate gagal -> `DEPLOYABLE False`.

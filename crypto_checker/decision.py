@@ -6,6 +6,8 @@ from .core import CheckerConfig, check_strategy
 from .validation import run_validation
 from .selection import walk_forward
 from .reality_check import reality_check
+from .schema import SCHEMA_VERSION
+from .io import atomic_write_json
 
 
 REGIME_MIN_PROFIT = 0.5
@@ -71,6 +73,7 @@ def deployment_decision(data, output_dir="reports/research", min_train_days=365,
         "majority_regimes_profitable": bool(profitable_regimes >= len(regime_rows) * REGIME_MIN_PROFIT),
     }
     decision = {
+        "schema_version": SCHEMA_VERSION,
         "best_signal_walk_forward": str(best_signal),
         "candidate_alpha_note": "best_signal_walk_forward is a CANDIDATE alpha, not a final alpha: the engine finds, tests, and kills alphas; production uses ensembles/combinations, never winner-takes-all",
         "data_mining": wf.get("data_mining"),
@@ -90,5 +93,5 @@ def deployment_decision(data, output_dir="reports/research", min_train_days=365,
     }
     decision["deployable"] = evaluate_deployable(gates)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    Path(output_dir, "deployment_decision.json").write_text(json.dumps(decision, indent=2, default=str), encoding="utf-8")
+    atomic_write_json(Path(output_dir, "deployment_decision.json"), decision)
     return decision

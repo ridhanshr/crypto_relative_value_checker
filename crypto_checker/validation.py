@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 from .core import CheckerConfig, check_strategy, infer_periods_per_year
 from .reality_check import reality_check
+from .schema import SCHEMA_VERSION
+from .io import atomic_write_json
 
 
 COST_STRESS_TIERS = ((0.0004, 0.0005), (0.0008, 0.001), (0.0012, 0.002), (0.0008, 0.002), (0.0015, 0.004))
@@ -131,9 +133,9 @@ def run_validation(data, config=None, train_ratio=0.6, validation_ratio=0.2, out
             stress_tiers.append((f"fee_{fee}_slippage_{slippage}", {"fee_rate": fee, "slippage_rate": slippage}))
     for name, overrides in stress_tiers:
         stress[name] = _metrics(check_strategy(oos_frame, replace(research_cfg, **overrides)))
-    result = {"splits": {name: {"start": str(min(ds)), "end": str(max(ds)), "periods": len(ds)} for name, ds in slice_dates.items()}, "performance": results, "risk_violations": violations, "cost_stress": stress, "benchmarks": benchmark_suite(oos_frame), "regimes": regime_performance(frame, full_run["pnl"]), "reality_check": reality_check([]), "continuous_equity": True, "survivorship_note": SURVIVORSHIP_NOTE, "gates": {"train_positive": results["train"]["total_return"] > 0, "validation_positive": results["validation"]["total_return"] > 0, "oos_positive": results["out_of_sample"]["total_return"] > 0, "oos_sharpe_above_one": results["out_of_sample"]["sharpe"] > 1, "oos_drawdown_above_minus_20pct": results["out_of_sample"]["max_drawdown"] > -0.20, "stress_positive": all(x["total_return"] > 0 for x in stress.values()), "no_risk_violations": all(value == 0 for value in violations.values()), "no_capacity_violations": all(metrics["capacity_violations"] == 0 for metrics in results.values())}}
+    result = {"schema_version": SCHEMA_VERSION, "splits": {name: {"start": str(min(ds)), "end": str(max(ds)), "periods": len(ds)} for name, ds in slice_dates.items()}, "performance": results, "risk_violations": violations, "cost_stress": stress, "benchmarks": benchmark_suite(oos_frame), "regimes": regime_performance(frame, full_run["pnl"]), "reality_check": reality_check([]), "continuous_equity": True, "survivorship_note": SURVIVORSHIP_NOTE, "gates": {"train_positive": results["train"]["total_return"] > 0, "validation_positive": results["validation"]["total_return"] > 0, "oos_positive": results["out_of_sample"]["total_return"] > 0, "oos_sharpe_above_one": results["out_of_sample"]["sharpe"] > 1, "oos_drawdown_above_minus_20pct": results["out_of_sample"]["max_drawdown"] > -0.20, "stress_positive": all(x["total_return"] > 0 for x in stress.values()), "no_risk_violations": all(value == 0 for value in violations.values()), "no_capacity_violations": all(metrics["capacity_violations"] == 0 for metrics in results.values())}}
     result["deployable"] = all(result["gates"].values())
     if output_dir:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        Path(output_dir, "validation.json").write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+        atomic_write_json(Path(output_dir, "validation.json"), result)
     return result
