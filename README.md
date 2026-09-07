@@ -371,17 +371,23 @@ Setiap artefak JSON membawa `schema_version: 1`. Aturan: **tambah field = minor 
 
 `DEPLOYABLE=True` berarti lolos semua gate, **bukan** jaminan profit. Vonis hanya memakai 5 hard gate — `wf_positive`, `oos_positive`, `no_risk_violations`, `no_capacity_violations`, `reality_check_pass` (IC terbaik lolos koreksi multiple-testing) — gate lain informasional. Satu hard gate gagal -> `DEPLOYABLE False`.
 
-## Recheck Dataset Funded 47-Aset (2024 → 2026-08)
+## Recheck Final via Entry Point Resmi (script `recheck_final.py`, kontrak v1.1)
 
-Dataset `data/midcap_2y_daily_2_funded.csv` (funding 100%) dijalankan ulang penuh dengan engine terbaru (`scripts/recheck_v2.py` + `recheck_v2b.py`; output lokal di `reports/recheck_v2/` — reports tidak masuk git). Hasil:
+Kedua dataset benchmark dijalankan ulang penuh lewat `validate_csv()` — sekaligus dogfooding kontrak Quantara. Output lokal `reports/recheck_final/{47,71}/decision.json` (reports tidak masuk git).
 
-- Walk-forward agregat: +52%, Sharpe 0.85, 4/5 fold profit — terlihat bagus.
-- **DSR (65 trials): 0.175** (null bar 0.92 > observed 0.85) → seleksi kemungkinan beruntung, alpha dibunuh.
-- Static OOS kontinu (low_vol_14): negatif. Ensemble top-3: −13.5%, Sharpe −0.22 — member lain tidak membawa alpha independen.
-- Capacity (low_vol_14): sensible di 10k (headroom 11x) dan 100k (headroom 1.1x, mepet); breach di 1M (59x) dan 10M (partisipasi maks 450% volume — mustahil dieksekusi).
-- **Vonis: DEPLOYABLE False.** Bukan karena universe/eksekusi/biaya (ketiganya terverifikasi) — melainkan tidak ada alpha yang survive koreksi multiple-testing di universe ini. Ruang pencarian ini kering; langkah berikut adalah riset signal/universe baru, bukan tuning parameter.
+| | 47-aset funded | 71-aset repaired |
+|---|---|---|
+| status / decision | `SUCCESS` / `REJECTED` | `SUCCESS` / `REJECTED` |
+| WF return / Sharpe / DD | +52% / 0,85 / −37% | −2,7% / 0,16 / −49% |
+| OOS return / Sharpe / DD | −10% / −0,34 / −0,36 | −26% / −1,20 / −0,31 |
+| DSR (65 trials) | **0,175** (null 0,92 > observed 0,85 → dibunuh) | **0,0** (null 1,31 → kill total) |
+| turnover harian | 0,19 | 0,26 |
+| capacity.max_sensible | 100.000 USD | 100.000 USD |
+| data_quality | 43 halt, 0 unexplained, 365 dead | 42 halt, 2 tolerated, 364 dead |
 
-Catatan: preflight atas CSV mentah melaporkan `valid: False` hanya karena kolom kerja `signal` belum ada (dibuat oleh `canonicalize`/`build_signals`) — bukan cacat data. Backlog: preflight sebaiknya tidak mewajibkan kolom kerja internal.
+Angka identik dengan recheck lama hingga ULP → fix determinisme tidak menggeser ekonomi, hanya menstabilkan byte. Pemenang berbeda antar universe (low_vol_14 vs vol_adj_momentum_30) = bukti tambahan tidak ada alpha dominan. **Vonis kedua: DEPLOYABLE False.** Ruang pencarian kering di kedua sisi; langkah berikut riset signal/universe baru, bukan tuning.
+
+Catatan lama (preflight menolak CSV tanpa kolom `signal`) sudah kedaluwarsa: API resmi menyuntik kolom kerja otomatis bila belum ada.
 
 ## Batasan
 
