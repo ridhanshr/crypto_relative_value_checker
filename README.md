@@ -62,8 +62,7 @@ Deployment decision (fail-closed)
 
 ```text
 crypto_checker/
-  core.py            # mesin backtest: ranking, PnL, fee/slippage, vol-targeting, capacity
-  binance_vision.py  # downloader klines 1d/4h/1h + funding (arsip bulanan + fallback API)
+  core.py            # mesin backtest: ranking, PnL, fee/slippage, vol-targeting, capacity  binance_vision.py  # downloader klines 1d/4h/1h + funding (arsip bulanan + fallback API)
   assets.py          # canonical mapping + migration factors + continuity audit
   lifecycle.py       # asset lifecycle engine: segmen listed/delisted, triase gap,
                      # manifest historis, metrik survivorship gap
@@ -77,6 +76,13 @@ crypto_checker/
   selection.py       # walk-forward selection bebas leakage + ensemble top-k
   capacity.py        # capacity curve per level AUM (10k/100k/1M/10M)
   decision.py        # keputusan deployment gabungan semua gate
+  api.py             # entry point resmi validate_csv() + envelope 3-keadaan
+  gate.py            # gate otomatis v2 (APPROVED_CANDIDATE/REJECTED/FLAG_REVIEW + review fields)
+  trial_registry.py  # log semua attempt + effective-N clustering
+  dsr.py             # DSR v2 (fail-loud, Pearson kurtosis, gray-zone siap gate)
+  cpcv.py            # combinatorial purged CV + regime labeling + summarize incl. max DD
+  ensemble_check.py  # pre-check korelasi member sebelum ensemble dirakit
+  repair.py          # primitif repair dataset (relabel migrasi, drop stale, tolak duplikat)
   spread_check.py    # ukur spread bid-ask riil dari order book Binance
   cli.py             # command-line interface
 scripts/
@@ -103,7 +109,17 @@ python -m pip install -r requirements.txt
 python -m pytest tests -q
 ```
 
-Harus 75 passed. Kalau ada yang gagal, jangan lanjut — perbaiki environment dulu.
+Harus 115 passed. Kalau ada yang gagal, jangan lanjut — perbaiki environment dulu.
+
+**Required pre-commit step** (belum ada CI server — harness di bawah ini manual dan wajib dijalankan sebelum push bila menyentuh kode numerik/engine):
+
+```bash
+python -m pytest tests -q                                  # L1 + golden + kontrak
+python scripts/determinism_check.py                        # L2: 2 run identik
+python scripts/runtime_burnin.py --stage small             # L5 kecil: 100/100
+```
+
+`runtime_burnin --stage full` (3x decision penuh) hanya untuk perubahan besar pada inti numerik. Golden fixture (`tests/fixtures/`) gagal = drift disengaja atau bug — review diff sebelum regenerate.
 
 ### 1. Jalan penuh riset + vonis deployment (ENTRY POINT RESMI)
 
@@ -364,7 +380,7 @@ Setiap artefak JSON membawa `schema_version: 1`. Aturan: **tambah field = minor 
 | `walk_forward.json` (`walk_forward`) | `schema_version, candidates: list, n_folds, folds: list, walk_forward: dict, gates: dict, deployable: bool` (+ opsional `data_mining`, `ensemble`) |
 | `capacity_curve.json` (`capacity`) | `schema_version, status: str, levels: list` (per level: `aum, total_return, sharpe, max_drawdown, capacity_violations, breach_trades, max_participation_ratio, headroom_multiple, sensible: bool`) |
 | `preflight.json` (`preflight`) | `schema_version, valid: bool, errors: list, warnings: list` |
-| `decision.json` (`result`, KANONIK) | `schema_version, status: SUCCESS\|FAILED_VALIDATION\|CHECKER_ERROR, decision: APPROVED\|REJECTED\|null, deployable: bool, deployable_meaning: str, gates: dict, metrics: dict\|null (wf_total_return, wf_sharpe, wf_drawdown, oos_total_return, oos_sharpe, oos_drawdown, dsr\|null, turnover_daily), capacity: dict\|null ({max_sensible\|null, status}), risk: dict, data_quality: dict, warnings: list, errors: list, artifacts: dict` |
+| `decision.json` (`result`, KANONIK) | `schema_version, status: SUCCESS\|FAILED_VALIDATION\|CHECKER_ERROR, decision: APPROVED\|REJECTED\|null, deployable: bool, deployable_meaning: str, review_required: bool, gate_decision: dict ({status: APPROVED_CANDIDATE\|REJECTED\|FLAG_REVIEW, reasons, reviewed_by\|null, review_decision\|null, review_timestamp\|null}), gates: dict, metrics: dict\|null (wf_total_return, wf_sharpe, wf_drawdown, oos_total_return, oos_sharpe, oos_drawdown, dsr\|null, turnover_daily), capacity: dict\|null ({max_sensible\|null, status}), risk: dict, data_quality: dict, warnings: list, errors: list, artifacts: dict` |
 | `analysis_summary.json` (`analysis`, via analyze_midcap) | `schema_version, mode: str, assets: list, preflight: dict, walk_forward: dict, deployable: bool` (divalidasi + ditulis atomik; violation = run gagal) |
 
 ## Arti DEPLOYABLE

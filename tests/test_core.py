@@ -1196,7 +1196,9 @@ def test_envelope_approved_shape_and_exit_codes():
     from crypto_checker.schema import validate_output_schema
     from crypto_checker.api import STATUS_FOR_EXIT
     approved = {"schema_version": 1, "status": "SUCCESS", "decision": "APPROVED", "deployable": True,
-                "deployable_meaning": "x", "gates": {"wf_positive": True}, "metrics": {
+                "deployable_meaning": "x", "review_required": False,
+                "gate_decision": {"status": "APPROVED_CANDIDATE", "reasons": []},
+                "gates": {"wf_positive": True}, "metrics": {
                     "wf_total_return": 0.52, "wf_sharpe": 0.85, "wf_drawdown": -0.37,
                     "oos_total_return": -0.04, "oos_sharpe": -0.22, "oos_drawdown": -0.18,
                     "dsr": 0.175, "turnover_daily": 0.08},

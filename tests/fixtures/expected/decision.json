@@ -3,11 +3,15 @@
   "best_signal_walk_forward": "reversal_1",
   "candidate_alpha_note": "best_signal_walk_forward is a CANDIDATE alpha, not a final alpha: the engine finds, tests, and kills alphas; production uses ensembles/combinations, never winner-takes-all",
   "data_mining": {
-    "n_trials": 4,
+    "n_trials": 6,
+    "raw_n_trials": 4,
+    "n_trials_used": 6,
+    "skewness": 0.09271978136021278,
+    "kurtosis": 2.3868921134055356,
     "n_obs": 76,
     "observed_sr": -1.919073591379261,
     "benchmark_sr": 0.0,
-    "expected_sharpe_null": 0.3845426291867738,
+    "expected_sharpe_null": 0.4751912470450792,
     "dsr": 0.0
   },
   "ensemble": {
@@ -18,14 +22,18 @@
         "members": [
           "reversal_1",
           "momentum_7"
-        ]
+        ],
+        "pre_check": "PROCEED",
+        "max_pairwise_corr": -0.30539494926815225
       },
       {
         "fold": 1,
         "members": [
           "reversal_1",
           "momentum_7"
-        ]
+        ],
+        "pre_check": "PROCEED",
+        "max_pairwise_corr": -0.347462539652043
       }
     ],
     "ensemble": {
@@ -288,12 +296,25 @@
       "majority_folds_profitable": false
     },
     "deployable": false,
+    "trial_registry": {
+      "raw_n_trials": 4,
+      "valid_n_trials": 4,
+      "effective_n_trials": 6,
+      "effective_by_fold": [
+        2,
+        4
+      ]
+    },
     "data_mining": {
-      "n_trials": 4,
+      "n_trials": 6,
+      "raw_n_trials": 4,
+      "n_trials_used": 6,
+      "skewness": 0.09271978136021278,
+      "kurtosis": 2.3868921134055356,
       "n_obs": 76,
       "observed_sr": -1.919073591379261,
       "benchmark_sr": 0.0,
-      "expected_sharpe_null": 0.3845426291867738,
+      "expected_sharpe_null": 0.4751912470450792,
       "dsr": 0.0
     },
     "ensemble": {
@@ -304,14 +325,18 @@
           "members": [
             "reversal_1",
             "momentum_7"
-          ]
+          ],
+          "pre_check": "PROCEED",
+          "max_pairwise_corr": -0.30539494926815225
         },
         {
           "fold": 1,
           "members": [
             "reversal_1",
             "momentum_7"
-          ]
+          ],
+          "pre_check": "PROCEED",
+          "max_pairwise_corr": -0.347462539652043
         }
       ],
       "ensemble": {
@@ -328,6 +353,30 @@
         "ens_drawdown_above_minus_20pct": false
       },
       "note": "diagnostic_only; ensemble membership is selected per fold, so this is not an unbiased estimate and never enters the deployable verdict"
+    },
+    "ensemble_pre_check": {
+      "per_fold": [
+        {
+          "fold": 0,
+          "members": [
+            "reversal_1",
+            "momentum_7"
+          ],
+          "pre_check": "PROCEED",
+          "max_pairwise_corr": -0.30539494926815225
+        },
+        {
+          "fold": 1,
+          "members": [
+            "reversal_1",
+            "momentum_7"
+          ],
+          "pre_check": "PROCEED",
+          "max_pairwise_corr": -0.347462539652043
+        }
+      ],
+      "recommendation": "PROCEED",
+      "note": "pre-assembly correlation screen; BLOCK folds are not aggregated"
     }
   },
   "validation_best_signal": {

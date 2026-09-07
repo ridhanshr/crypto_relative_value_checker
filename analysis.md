@@ -218,10 +218,17 @@ Temuan terpenting selama pembuktian: golden test lintas-proses menangkap nondete
 Catatan presisi: CSV adalah round-trip lossy di level ULP (terukur maks 2,8e-14) — golden fixture dibangkitkan dari byte CSV yang di-commit (bukan dari memori), sehingga byte-equality menguji mesin murni, bukan presisi I/O.
 
 ## 8. Kontrak pra-integrasi Quantara (schema v1.1, aditif — tetap version 1)
-
 Empat keputusan pra-integrasi, semua terimplementasi + ter-test:
 
 1. **Contract freeze:** envelope `decision.json` (`status`, `decision`, `deployable`, `deployable_meaning`, `gates`, `metrics` 8-field, `capacity`, `risk`, `data_quality`, `warnings`, `errors`, `artifacts`) — populasi mengikuti tabel locked: SUCCESS→metrics populated/decision set; FAILED_VALIDATION/CHECKER_ERROR→metrics & capacity null, decision null, errors populated, `deployable` false. Aturan versi: v1.0→v1.1 aditif (version tetap 1); bump ke 2 hanya untuk rename/hapus/ubah-tipe/ubah-semantik.
 2. **Satu entry point resmi:** `validate_csv()` di `crypto_checker/api.py` (+ `python -m crypto_checker.validate`, exit 0/2/1); `cli.py` lama di-guard `main()` agar import-safe tanpa perubahan perilaku. Quantara tidak memanggil internal.
 3. **Tiga keadaan eksplisit:** SUCCESS+APPROVED/REJECTED (REJECTED = ditolak karena merit, bukan error) vs FAILED_VALIDATION (evaluasi tidak selesai) vs CHECKER_ERROR (tanpa klaim riset). `decision.json` selalu ditulis, bahkan di jalur gagal.
 4. **Makna deployable dikunci di kontrak:** "Lolos validation criteria checker. BUKAN izin live trading / real money." Suite 82 test lulus.
+
+## 9. Checker v2 (Fase 0–5): registry, DSR gray-zone, CPCV, ensemble pre-check, sqrt capacity, automated gate
+
+- **Trial registry:** semua attempt tercatat (gagal/pendek memakai `ExclusionReason` enum, bukan teks bebas); DSR memakai effective-N hasil clustering korelasi (null bar turun vs raw-65 — diterima apa adanya).
+- **DSR v2 fail-loud** (Pearson kurtosis; contoh spek 3.1 mengonfirmasi) + gray-zone 0.5–0.95 di gate.
+- **CPCV 45 path low_vol_14:** 84% profitabel, Sharpe mean +0.88, positif di semua regime (tanpa concentration flag) — TETAPI max DD −46% train / −37% OOS melewati threshold → REJECTED via DD. Verdict konsisten, alasan diperkaya (bukan selection-bias melainkan drawdown).
+- **Ensemble pre-check** ter-wire (BLOCK folds tidak diagregat); **sqrt-impact overlay** + ADV 90d + warning linear; hard gate partisipasi utuh.
+- **Gate otomatis** + mapping envelope (`review_required`, blok `gate_decision` bersarang, `decision=null` saat FLAG). Fixture `known_rejected_cases.json` mengunci kedua kasus REJECTED sebagai unit test logika gate.

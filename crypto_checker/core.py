@@ -37,6 +37,37 @@ class CheckerConfig:
     slippage_mode: str = "tier"
     spread_csv: str = ""
     periods_per_year: float | None = None
+    # --- v2 DSR ---
+    dsr_reject_threshold: float = 0.5
+    dsr_high_confidence_threshold: float = 0.95
+    dsr_use_skew_kurtosis_adjustment: bool = True
+    dsr_count_all_trials: bool = True
+    # --- v2 CPCV / walk-forward ---
+    cpcv_n_groups: int = 10
+    cpcv_n_test_groups: int = 2
+    cpcv_embargo_pct: float = 0.01
+    cpcv_purge_pct: float = 0.01
+    regime_label_source: str = "realized_vol_percentile"
+    cpcv_mode: str = "search"
+    cpcv_full_budget_only_on_best_config: bool = True
+    # --- v2 ensemble ---
+    ensemble_max_pairwise_corr: float = 0.7
+    ensemble_corr_metric: str = "returns"
+    # --- v2 capacity ---
+    capacity_impact_model: str = "sqrt"
+    capacity_adv_lookback_days: int = 90
+    capacity_adv_exclude_outlier_days: bool = True
+    capacity_min_headroom: float = 1.5
+    # --- v2 drawdown gate ---
+    dd_max_threshold_wf: float = -0.25
+    dd_max_threshold_oos: float = -0.20
+    gate_auto_reject_on_dd: bool = True
+    # --- v2 data quality (module Fase 6; fields reserved for gate wiring) ---
+    data_quality_dead_unit: str = "asset_days"
+    data_quality_max_unexplained_halts: int = 0
+    # --- v2 gate ---
+    gate_auto_reject_on_oos_sharpe_negative: bool = True
+    gate_flag_review_on_ensemble_corr: bool = True
 
 
 def _validate(data, signal_column):

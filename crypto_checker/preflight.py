@@ -112,7 +112,9 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
         unexplained = gap_table[gap_table["reason"] == "unexplained_interior"] if not gap_table.empty else gap_table
         gap_classification = {
             "migration_halt_days": int(halted["gap_days"].sum()) if not halted.empty else 0,
+            "halt_blocks": int(len(halted)) if not halted.empty else 0,
             "unexplained_interior_days": int(unexplained["gap_days"].sum()) if not unexplained.empty else 0,
+            "unexplained_blocks": int(len(unexplained)) if not unexplained.empty else 0,
             "migration_halt_assets": sorted(halted["asset"].unique().tolist()) if not halted.empty else [],
             "unexplained_assets": sorted(unexplained["asset"].unique().tolist()) if not unexplained.empty else [],
         }
@@ -130,6 +132,7 @@ def validate_dataset(data, require_funding=False, require_liquidity=False, min_a
             if not tiny.empty:
                 tiny_detail = "; ".join(f"{r.asset}:{r.gap_start.date()}" for r in tiny.itertuples())
                 warnings.append(f"Tolerated {int(tiny['gap_days'].sum())} single-day gap(s) ({tiny_detail}); treated as data hiccups, forced-exit applies if held")
+                gap_classification["tolerated_blocks"] = int(len(tiny))
             if not big.empty:
                 gap_detail = "; ".join(f"{r.asset}:{r.gap_days}" for r in big.itertuples())
                 message = f"Unexplained interior gaps: {int(big['gap_days'].sum())} missing asset-periods ({gap_detail[:200]})"

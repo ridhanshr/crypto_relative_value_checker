@@ -131,6 +131,8 @@ SCHEMAS = {
         "decision": "str?",
         "deployable": "bool",
         "deployable_meaning": "str",
+        "review_required": "bool",
+        "gate_decision": "dict",
         "gates": "dict",
         "metrics": "dict?",
         "capacity": "dict?",

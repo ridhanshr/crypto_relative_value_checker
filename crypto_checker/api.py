@@ -30,6 +30,7 @@ from .signals import build_signals
 from .capacity import capacity_curve, DEFAULT_AUM_LEVELS
 from .schema import SCHEMA_VERSION, DEPLOYABLE_MEANING
 from .io import atomic_write_json
+from .gate import evaluate_gate, GateStatus
 
 EXIT_OK = 0
 EXIT_CHECKER_ERROR = 1
@@ -38,13 +39,16 @@ EXIT_FAILED_VALIDATION = 2
 STATUS_FOR_EXIT = {"SUCCESS": EXIT_OK, "FAILED_VALIDATION": EXIT_FAILED_VALIDATION, "CHECKER_ERROR": EXIT_CHECKER_ERROR}
 
 
-def _envelope(status, decision, deployable, gates, metrics, capacity, risk, data_quality, warnings, errors, artifacts):
+def _envelope(status, decision, deployable, gates, metrics, capacity, risk, data_quality, warnings, errors, artifacts,
+              review_required=False, gate_decision=None):
     return {
         "schema_version": SCHEMA_VERSION,
         "status": status,
         "decision": decision,
         "deployable": bool(deployable),
         "deployable_meaning": DEPLOYABLE_MEANING,
+        "review_required": bool(review_required),
+        "gate_decision": gate_decision if gate_decision is not None else {},
         "gates": gates,
         "metrics": metrics,
         "capacity": capacity,
@@ -65,7 +69,8 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
                  fee_rate=0.0004, slippage_rate=0.0005, vol_target_annual=0.20,
                  rebalance_every=5, min_train_days=365, test_days=120,
                  ensemble_top_k=3, expected_frequency="D", tolerated_gap_days=1,
-                 listing_manifest=None, capacity_aums=None, candidates=None):
+                 listing_manifest=None, capacity_aums=None, candidates=None,
+                 strategy_id="strategy", cpcv_mode="search"):
     """Run the full validation pipeline on a CSV dataset.
 
     Returns the v1.1 result envelope (dict) and always writes
@@ -162,6 +167,69 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
         envelope = dict(decision)
         envelope.update(_envelope("SUCCESS", verdict, decision["deployable"], decision["gates"],
                                   metrics, capacity, risk, data_quality, warnings, [], artifacts))
+        # v2 automated gate (search mode: summary from validation segments;
+        # final_validation: full CPCV budget on the best config, once).
+        gate_cfg = CheckerConfig(n_long=best_n, n_short=best_n, fee_rate=fee_rate,
+                                 slippage_rate=slippage_rate, vol_target_annual=vol_target_annual,
+                                 rebalance_every=rebalance_every)
+        dm = decision.get("data_mining") or {}
+        dsr_result = {"dsr": dm.get("dsr", 0.0), "sharpe_null_bar": dm.get("expected_sharpe_null", 0.0),
+                      "observed_sharpe": float(wf_summary["sharpe"]),
+                      "n_trials_used": dm.get("n_trials_used", dm.get("n_trials", 0)),
+                      "skewness": dm.get("skewness", 0.0), "kurtosis": dm.get("kurtosis", 3.0)}
+        perf = decision["validation_best_signal"].get("performance", {}) or {}
+        oos_perf = perf.get("out_of_sample", {}) or {}
+        train_perf = perf.get("train", {}) or {}
+        if cpcv_mode == "final_validation":
+            from .cpcv import run_cpcv, summarize_cpcv
+            from .core import check_strategy
+            built = build_signals(data)
+            best_cfg = CheckerConfig(n_long=best_n, n_short=best_n, fee_rate=fee_rate,
+                                     slippage_rate=slippage_rate, signal_column=best_signal,
+                                     vol_target_annual=vol_target_annual, rebalance_every=rebalance_every,
+                                     require_funding=require_funding, delist_mode="forced_exit")
+
+            def _strategy(train_frame, test_frame):
+                tr = check_strategy(train_frame, best_cfg)
+                te = check_strategy(test_frame, best_cfg)
+                te_pnl = te["pnl"]
+                rets = pd.Series(te_pnl["return"].iloc[1:].to_numpy(),
+                                 index=pd.to_datetime(te_pnl["timestamp"].iloc[1:], utc=True))
+                return {"test_returns": rets,
+                        "train_equity": pd.Series(tr["pnl"]["equity"].to_numpy(), dtype=float),
+                        "test_equity": pd.Series(te_pnl["equity"].to_numpy(), dtype=float)}
+
+            cpcv_summary = summarize_cpcv(run_cpcv(built, _strategy, gate_cfg))
+        else:
+            cpcv_summary = {"n_folds": 0, "pct_profitable_folds": 0.0,
+                            "sharpe_mean": float(oos_perf.get("sharpe", 0.0)),
+                            "max_dd_walk_forward": float(train_perf.get("max_drawdown", 0.0)),
+                            "max_dd_oos": float(oos_perf.get("max_drawdown", 0.0)),
+                            "sharpe_by_regime": {}, "regime_concentration_flag": False,
+                            "provenance": "validation_segments_search_mode"}
+        ens_pre = (decision.get("walk_forward") or {}).get("ensemble_pre_check")
+        cap_gate = {str(lvl["aum"]): {"status": lvl.get("sqrt_impact", {}).get("status", "UNKNOWN")}
+                    for lvl in cap.get("levels", [])} if liquidity_col else {}
+        dq_gate = {"halt_count": int(gap.get("halt_blocks", 0)),
+                   "halt_unexplained_count": int(gap.get("unexplained_blocks", 0)),
+                   "halt_tolerated_count": int(gap.get("tolerated_blocks", 0)),
+                   "dead_asset_days": None, "dead_asset_count": int(surv.get("n_missing_dead", 0)),
+                   "universe_size": int(check.get("assets", 0))}
+        gate = evaluate_gate(strategy_id, dsr_result, cpcv_summary, ens_pre, cap_gate,
+                             gate_cfg, data_quality_report=dq_gate,
+                             data_as_of=str(pd.to_datetime(data["timestamp"], utc=True).max().date()))
+        gate_block = {"status": gate.status.value, "reasons": gate.reasons,
+                      "reviewed_by": gate.reviewed_by, "review_decision": gate.review_decision,
+                      "review_timestamp": gate.review_timestamp}
+        review_required = gate.status == GateStatus.FLAG_REVIEW
+        if gate.status == GateStatus.REJECTED:
+            verdict, deployable_final = "REJECTED", False
+        elif gate.status == GateStatus.FLAG_REVIEW:
+            verdict, deployable_final = None, False
+        else:
+            verdict, deployable_final = "APPROVED", bool(decision["deployable"])
+        envelope.update({"decision": verdict, "deployable": deployable_final,
+                         "review_required": bool(review_required), "gate_decision": gate_block})
         atomic_write_json(out / "decision.json", envelope)
         return envelope
     except Exception as exc:
