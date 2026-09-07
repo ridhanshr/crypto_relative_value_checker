@@ -65,37 +65,128 @@ crypto_checker/
   core.py            # mesin backtest: ranking, PnL, fee/slippage, vol-targeting, capacity
   binance_vision.py  # downloader klines 1d/4h/1h + funding (arsip bulanan + fallback API)
   assets.py          # canonical mapping + migration factors + continuity audit
+  lifecycle.py       # asset lifecycle engine: segmen listed/delisted, triase gap,
+                     # manifest historis, metrik survivorship gap
+  repair.py          # primitif repair dataset (relabel migrasi, drop stale, tolak duplikat)
   preflight.py       # validasi dataset sebelum backtest (fail-fast)
   signals.py         # pustaka 15 faktor (momentum, reversal, carry, low-vol, combo z-score)
   signal_audit.py    # cek signal konstan / forward-fill / kumulatif
   research.py        # rank-IC, t-stat, Newey-West, bootstrap CI, quantile return
-  reality_check.py   # koreksi multiple-testing (Bonferroni), utilitas statistik
+  reality_check.py   # koreksi multiple-testing (Bonferroni) + Deflated Sharpe Ratio
   validation.py      # split train/val/OOS continuous-equity, regime, benchmark, stress
-  selection.py       # walk-forward selection bebas leakage
+  selection.py       # walk-forward selection bebas leakage + ensemble top-k
+  capacity.py        # capacity curve per level AUM (10k/100k/1M/10M)
   decision.py        # keputusan deployment gabungan semua gate
   spread_check.py    # ukur spread bid-ask riil dari order book Binance
   cli.py             # command-line interface
 scripts/
   download_midcap.py # unduh dataset per sektor (l1_l2, defi, oracle_infra, gaming, meme, legacy, mega)
   download_binance_sample.py
+  fetch_funding.py   # unduh + agregasi funding rate (arsip bulanan + API)
+  repair_midcap.py   # repair generik dataset partial
+  repair_71.py       # repair file 71-aset (contoh repair terdokumentasi + manifest)
   analyze_midcap.py  # pipeline analisis midcap end-to-end (preflight, spread, signal, WF)
+  build_listing_manifest.py # bangun manifest historis 1028 simbol futures dari Binance Vision
+  sweep_exposure.py  # sweep skala exposure/gross
 tests/
-  test_core.py       # 50 regression test
+  test_core.py       # 75 regression test
 ```
 
-## Instalasi
+## Cara Penggunaan
+
+Prinsip: **data kotor tidak pernah menghasilkan angka.** Setiap workflow di bawah berhenti di gerbang pertama yang gagal, dengan alasan eksplisit (bukan traceback misterius).
+
+### 0. Instalasi + verifikasi sistem sehat
 
 ```bash
 python -m pip install -r requirements.txt
-```
-
-Dependency: `pandas`, `numpy`, `pytest`.
-
-Jalankan test:
-
-```bash
 python -m pytest tests -q
 ```
+
+Harus 75 passed. Kalau ada yang gagal, jangan lanjut — perbaiki environment dulu.
+
+### 1. Jalan penuh riset + vonis deployment (paling umum)
+
+Satu perintah menjalankan preflight → backtest → validasi → walk-forward → decision:
+
+```bash
+python -m crypto_checker.cli ^
+  --input data\midcap_2y_daily_2_funded.csv ^
+  --output reports\hasil_saya ^
+  --research ^
+  --liquidity-column quote_volume --cost-preset midcap
+```
+
+Output utama di folder output: `summary.json` (hasil backtest), `validation.json` (train/val/OOS + gates), `walk_forward/walk_forward.json` (pilihan per fold + DSR + ensemble), `deployment_decision.json` (vonis akhir). Baca `deployable`: `true`/`false` + `gates` mana yang gagal.
+
+### 2. Uji satu signal manual
+
+```bash
+python -m crypto_checker.cli ^
+  --input data\midcap_2y_daily_2_funded.csv ^
+  --output reports\lowvol14 ^
+  --signal low_vol_14 --n-long 3 --n-short 3 ^
+  --liquidity-column quote_volume --cost-preset midcap
+```
+
+Aturan eksekusi yang dipaksakan: **signal(t) dieksekusi di t+1** untuk semua signal tanpa kecuali. Input butuh ≥2 bar per aset (bar pertama dikorbankan untuk lag).
+
+### 3. Dataset kotor → repair → verifikasi (skenario ideal)
+
+Kalau preflight menolak file (duplikat / gap tak terjelaskan / diskontinuitas migrasi):
+
+```bash
+# a. Lihat apa yang salah (tidak perlu flag toleransi dulu)
+python scripts\strict_gap_check.py
+
+# b. Repair memakai primitif library (contoh terdokumentasi: repair_71.py)
+python scripts\repair_71.py
+# -> data\midcap_2y_daily_2_repaired.csv + *_repair_manifest.json
+#    (setiap baris yang dibuang/di-relabel tercatat di manifest)
+
+# c. Verifikasi ulang sampai valid
+python scripts\verify_dataset.py --input data\midcap_2y_daily_2_repaired.csv
+```
+
+Target: `strict valid: True`, `errors: []`. Lubang 1-hari otomatis jadi warning (hiccup API); halt migrasi terdokumentasi tidak pernah error; hanya lubang multi-hari tak terjelaskan yang menggagalkan run.
+
+### 4. Capacity: masih masuk akal di AUM berapa? (via Python)
+
+```python
+from crypto_checker.capacity import capacity_curve
+from crypto_checker.core import CheckerConfig
+report = capacity_curve(data, base_config=CheckerConfig(
+    n_long=3, n_short=3, signal_column="low_vol_14",
+    liquidity_column="quote_volume",
+    liquidity_tiers=((0.5, 0.0004, 0.0005), (0.0, 0.0015, 0.004))),
+    output_dir="reports/capacity")
+# per level AUM: sensible True/False + headroom_multiple
+# headroom < 1 = sudah breach di AUM itu
+```
+
+### 5. Survivorship: seberapa besar bias universe saya? (via Python)
+
+```bash
+python scripts\build_listing_manifest.py   # sekali saja (butuh internet)
+```
+
+```python
+from crypto_checker.lifecycle import measure_survivorship_gap
+gap = measure_survivorship_gap(data, "data/historical_listing_manifest.csv")
+# gap["missing_dead"] = koin mati in-window yang tak ada di dataset
+# (crash mereka tidak masuk cross-section -> return terflatter)
+```
+
+### Tabel kegagalan umum
+
+| Pesan | Artinya | Tindakan |
+|---|---|---|
+| `PREFLIGHT_FAILED` | data tidak lolos gerbang (lihat `errors` di `preflight.json`) | workflow 3 |
+| `REPAIR_REFUSED: N residual duplicates` | duplikat tersisa pasca-repair | investigasi manual, jangan agregasi diam-diam |
+| `Migration source collision` | dua ticker sumber hidup bersamaan | potong di effective date resmi |
+| `Migration price discontinuities require official factors` | seam >20% tanpa faktor resmi | exclude aset + dokumentasikan, atau cari faktor resmi |
+| `No executable signals` | <2 bar per aset | tambah data |
+| `Missing price for held positions` | aset hilang saat dipegang (mode `error`) | pakai `delist_mode="forced_exit"` untuk riset, investigasi untuk produksi |
 
 ## Download Data
 
