@@ -73,3 +73,28 @@ def test_dsr_fails_loudly_on_short_or_degenerate_data():
         deflated_sharpe_ratio(1.0, 5, pd.Series([0.0] * 500), skill_free_variance=0.04)
     with pytest.raises(ValueError, match="skill_free_variance"):
         deflated_sharpe_ratio(1.0, 50, pd.Series(np.random.default_rng(5).normal(size=500)))
+
+
+def test_effective_n_never_exceeds_raw_invariant():
+    """Regression test for bug where effective_n_trials exceeded raw_n_trials
+    due to cross-fold double-counting (clustering across folds duplicated
+    correlated trials instead of clustering per-fold then summing)."""
+    from crypto_checker.trial_registry import TrialRegistry
+    import pandas as pd
+    import numpy as np
+    rng = np.random.default_rng(999)
+    reg = TrialRegistry()
+    # Create 4 distinct base return series (one per signal)
+    bases = {sig: pd.Series(np.random.default_rng(i).normal(size=200)) for i, sig in enumerate(["a", "b", "c", "d"])}
+    for fold in range(5):
+        for i, signal in enumerate(["a", "b", "c", "d"]):
+            trial_id = f"fold{fold}|{signal}"
+            # Same params repeated across folds -> should cluster together
+            reg.log_trial(f"fold{fold}|{signal}", {"signal": signal}, 1.0,
+                         returns=bases[signal] + rng.normal(scale=1e-9, size=200))
+    # raw = 20 attempts (5 folds × 4 signals), but only 4 unique configs
+    # effective_n should be 4 (one per unique config), not 20
+    assert reg.raw_n_trials() == 20
+    assert reg.effective_n_trials(0.9) == 4
+    # Invariant: effective_n_trials must never exceed raw_n_trials
+    assert reg.effective_n_trials(0.9) <= reg.raw_n_trials()

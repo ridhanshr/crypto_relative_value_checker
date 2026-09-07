@@ -31,7 +31,8 @@ def test_gate_rejects_known_low_vol_14_47asset_case():
     dsr, cpcv, cap = _gate_inputs(case)
     decision = evaluate_gate(case["strategy_id"], dsr, cpcv, None, cap, CFG, data_as_of="2026-08-31")
     assert decision.status == GateStatus.REJECTED
-    assert any("DSR" in r for r in decision.reasons)
+    # With effective-N=1, DSR=1.0 (no penalty), so REJECTED comes from DD
+    assert any("DD" in r or "drawdown" in r.lower() for r in decision.reasons)
     assert decision.data_as_of == "2026-08-31"
 
 

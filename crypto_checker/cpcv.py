@@ -124,7 +124,8 @@ def summarize_cpcv(results):
     if not results:
         return {"n_folds": 0, "pct_profitable_folds": 0.0, "sharpe_mean": 0.0,
                 "max_dd_walk_forward": 0.0, "max_dd_oos": 0.0,
-                "sharpe_by_regime": {}, "regime_concentration_flag": False}
+                "sharpe_by_regime": {}, "regime_concentration_flag": False,
+                "ruin_flag": False, "ruin_note": ""}
     sharpes = [r.sharpe_oos for r in results]
     profits = {r.fold_id: r.test_return for r in results}
     by_regime = {}
@@ -136,13 +137,20 @@ def summarize_cpcv(results):
             profit_by_regime[r.regime_label] = profit_by_regime.get(r.regime_label, 0.0) + r.test_return
     total_profit = sum(profit_by_regime.values())
     concentration = (max(profit_by_regime.values()) / total_profit > 0.8) if total_profit > 0 else False
+    max_dd_wf = min(_max_drawdown(r.equity_curve_train) for r in results)
+    max_dd_oos = min(_max_drawdown(r.equity_curve_oos) for r in results)
+    ruin_flag = bool(max_dd_wf < -1.0 or max_dd_oos < -1.0)
+    ruin_note = ("engine tidak memodelkan forced liquidation; angka DD di bawah -100% "
+                 "bukan hasil yang bisa di-trade, dilaporkan mentah untuk transparansi") if ruin_flag else ""
     return {
         "n_folds": len(results),
         "pct_profitable_folds": float(sum(1 for r in results if r.test_return > 0) / len(results)),
         "sharpe_mean": float(sum(sharpes) / len(sharpes)),
-        "max_dd_walk_forward": float(min(_max_drawdown(r.equity_curve_train) for r in results)),
-        "max_dd_oos": float(min(_max_drawdown(r.equity_curve_oos) for r in results)),
+        "max_dd_walk_forward": float(max_dd_wf),
+        "max_dd_oos": float(max_dd_oos),
         "sharpe_by_regime": {k: float(sum(v) / len(v)) for k, v in by_regime.items()},
         "regime_concentration_flag": bool(concentration),
+        "ruin_flag": bool(ruin_flag),
+        "ruin_note": ruin_note,
         "_debug_profit_by_regime": {k: float(v) for k, v in profit_by_regime.items()},
     }
