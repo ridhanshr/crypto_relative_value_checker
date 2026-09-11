@@ -415,7 +415,7 @@ Catatan lama (preflight menolak CSV tanpa kolom `signal`) sudah kedaluwarsa: API
 
 - `data_quality.py` belum menjadi modul mandiri; `data_quality_report` masih dict opsional dari preflight. Implementasi berikutnya wajib mengekspos `dead_asset_days`, `dead_asset_count`, `halt_count`, `halt_unexplained_count`, dan `halt_tolerated_count` lalu mengaktifkan FLAG_REVIEW secara otomatis.
 - GitHub Actions menjalankan `python -m pytest tests -q` pada setiap push dan pull request. Sebelum perubahan numerik tetap jalankan lokal `determinism_check.py` dan `runtime_burnin.py --stage small`; CI tidak mengakses dataset research besar.
-- Quantara state machine belum mengonsumsi `gate_decision`: status RESEARCH, REJECTED, FLAG_REVIEW, APPROVED_PAPER, dan APPROVED_LIVE masih perlu tabel/state transition, actor review, dan event audit di sisi Quantara.
+- Checker kini menyediakan adapter state machine fail-closed di `strategy_state.py`: RESEARCH → REJECTED/FLAG_REVIEW/APPROVED_CANDIDATE → APPROVED_PAPER → APPROVED_LIVE, dengan actor, timestamp, reason, dan event history. Quantara tetap harus menyimpan state/event ini di DB dan menerapkan operational controls sendiri; checker tidak pernah memberi izin live money secara otomatis.
 
 ## Batasan
 
