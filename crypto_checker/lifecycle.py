@@ -319,6 +319,9 @@ def measure_survivorship_gap(data, manifest):
     missing = in_window[~in_window["canonical"].isin(have)].copy()
     dead = missing[missing["delisted_at"].notna()].copy()
     alive = missing[missing["delisted_at"].isna()].copy()
+    dead["overlap_days"] = (
+        dead["delisted_at"].clip(upper=end) - dead["listed_at"].clip(lower=start)
+    ).dt.total_seconds().div(86400).clip(lower=0).add(1)
     universe = sorted(in_window["canonical"].unique().tolist())
     return {
         "window_start": str(start),
@@ -327,6 +330,7 @@ def measure_survivorship_gap(data, manifest):
         "n_dataset": int(len(have)),
         "coverage_ratio": float(len(set(have) & set(universe)) / max(len(universe), 1)),
         "n_missing_dead": int(dead["canonical"].nunique()),
+        "missing_dead_asset_days": int(dead["overlap_days"].sum()) if not dead.empty else 0,
         "missing_dead": sorted(dead["canonical"].unique().tolist()),
         "n_missing_alive": int(alive["canonical"].nunique()),
         "missing_alive": sorted(alive["canonical"].unique().tolist()),

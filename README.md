@@ -403,11 +403,19 @@ Kedua dataset benchmark dijalankan ulang penuh lewat `validate_csv()` — sekali
 | capacity.max_sensible | 100.000 USD | 100.000 USD |
 | data_quality | 43 halt, 0 unexplained, 365 dead | 42 halt, 2 tolerated, 364 dead |
 
-Low_vol_14 sempat dihitung salah dengan 5 fold sebagai trial. Recompute yang benar memakai seluruh search log: `raw=75`, `valid=65`, `effective=13`, DSR `2.43e-12` (null 0,91). Jadi selection-bias correction tetap membunuh sinyal; verdict juga ditolak oleh DD (CPCV train −46%, OOS −37%). Vol_adj_momentum_30 tetap REJECTED dari dua arah independen: DSR 0,0 + ruin tak termodel (CPCV DD −200%/−338%, `ruin_flag=true`).
+Low_vol_14 sempat dihitung salah dengan 5 fold sebagai trial. Recompute yang benar memakai seluruh search log: `raw=75`, `valid=65`, `effective=13`, DSR `2.43e-12` (null 0,91). Jadi selection-bias correction tetap membunuh sinyal; verdict juga ditolak oleh DD (CPCV train −46%, OOS −37%). **Low_vol_14 adalah kill total dalam bentuk saat ini, bukan kandidat yang "diselamatkan" dengan vol-targeting.** Perubahan sizing adalah hipotesis baru dengan trial budget dan registry sendiri; jika dicoba, setiap varian menambah multiple-testing burden. Vol_adj_momentum_30 tetap REJECTED dari dua arah independen: DSR 0,0 + ruin tak termodel (CPCV DD −200%/−338%, `ruin_flag=true`).
 
 Catatan metodologi: `data_mining.observed_sharpe` (0,5128 pada selection path) dan `cpcv_summary.sharpe_mean` (sekitar 0,88 pada rata-rata OOS per-path) mengukur basis berbeda. Yang pertama adalah Sharpe agregat dari jalur pencarian/walk-forward yang dipilih dan dipakai DSR; yang kedua adalah rata-rata Sharpe OOS dari 45 split CPCV purge/embargo. Keduanya tidak boleh dibandingkan sebagai duplikat metrik atau dianggap bug.
 
+Catatan penting: DSR menguji apakah kandidat yang dipilih survive selection bias; CPCV Sharpe menguji robustness OOS per split. Vol-targeting dapat mengubah DD, tetapi tidak mengubah fakta bahwa sinyal kandidat gagal DSR.
+
 Catatan lama (preflight menolak CSV tanpa kolom `signal`) sudah kedaluwarsa: API resmi menyuntik kolom kerja otomatis bila belum ada. Quantara/CI wajib membaca `decision.json` (`status`, `decision`, `review_required`, `gate_decision`), bukan menyimpulkan APPROVED/REJECTED dari exit code.
+
+## Follow-up sebelum Integrasi Operational
+
+- `data_quality.py` belum menjadi modul mandiri; `data_quality_report` masih dict opsional dari preflight. Implementasi berikutnya wajib mengekspos `dead_asset_days`, `dead_asset_count`, `halt_count`, `halt_unexplained_count`, dan `halt_tolerated_count` lalu mengaktifkan FLAG_REVIEW secara otomatis.
+- GitHub Actions menjalankan `python -m pytest tests -q` pada setiap push dan pull request. Sebelum perubahan numerik tetap jalankan lokal `determinism_check.py` dan `runtime_burnin.py --stage small`; CI tidak mengakses dataset research besar.
+- Quantara state machine belum mengonsumsi `gate_decision`: status RESEARCH, REJECTED, FLAG_REVIEW, APPROVED_PAPER, dan APPROVED_LIVE masih perlu tabel/state transition, actor review, dan event audit di sisi Quantara.
 
 ## Batasan
 

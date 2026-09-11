@@ -31,6 +31,7 @@ from .capacity import capacity_curve, DEFAULT_AUM_LEVELS
 from .schema import SCHEMA_VERSION, DEPLOYABLE_MEANING
 from .io import atomic_write_json
 from .gate import evaluate_gate, GateStatus
+from .data_quality import report_from_preflight
 
 EXIT_OK = 0
 EXIT_CHECKER_ERROR = 1
@@ -108,8 +109,9 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
         "funding_active_gaps": int(funding_gaps.get("active", 0)),
         "survivorship_missing_dead": int(surv.get("n_missing_dead", 0)),
     }
+    quality_report = report_from_preflight(check, CheckerConfig())
     if not check.get("valid", False):
-        envelope = _envelope("FAILED_VALIDATION", None, False, {}, None, None, {}, data_quality,
+        envelope = _envelope("FAILED_VALIDATION", None, False, {}, None, None, {}, quality_report,
                              warnings, [str(e) for e in check.get("errors", [])], artifacts)
         atomic_write_json(out / "decision.json", envelope)
         return envelope
@@ -166,7 +168,7 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
         verdict = "APPROVED" if decision["deployable"] else "REJECTED"
         envelope = dict(decision)
         envelope.update(_envelope("SUCCESS", verdict, decision["deployable"], decision["gates"],
-                                  metrics, capacity, risk, data_quality, warnings, [], artifacts))
+                                  metrics, capacity, risk, quality_report, warnings, [], artifacts))
         # v2 automated gate (search mode: summary from validation segments;
         # final_validation: full CPCV budget on the best config, once).
         gate_cfg = CheckerConfig(n_long=best_n, n_short=best_n, fee_rate=fee_rate,
@@ -210,11 +212,7 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
         ens_pre = (decision.get("walk_forward") or {}).get("ensemble_pre_check")
         cap_gate = {str(lvl["aum"]): {"status": lvl.get("sqrt_impact", {}).get("status", "UNKNOWN")}
                     for lvl in cap.get("levels", [])} if liquidity_col else {}
-        dq_gate = {"halt_count": int(gap.get("halt_blocks", 0)),
-                   "halt_unexplained_count": int(gap.get("unexplained_blocks", 0)),
-                   "halt_tolerated_count": int(gap.get("tolerated_blocks", 0)),
-                   "dead_asset_days": None, "dead_asset_count": int(surv.get("n_missing_dead", 0)),
-                   "universe_size": int(check.get("assets", 0))}
+        dq_gate = quality_report
         gate = evaluate_gate(strategy_id, dsr_result, cpcv_summary, ens_pre, cap_gate,
                              gate_cfg, data_quality_report=dq_gate,
                              data_as_of=str(pd.to_datetime(data["timestamp"], utc=True).max().date()))
