@@ -64,6 +64,17 @@ def test_summarize_reports_worst_drawdowns():
     assert summary["max_dd_walk_forward"] == pytest.approx(-0.3)
     assert summary["max_dd_oos"] == pytest.approx(-0.3)
     assert summary["n_folds"] == 2
+    assert summary["ruin_flag"] is False
+
+
+def test_summarize_flags_ruin_below_minus_100_percent():
+    result = FoldResult(
+        0, pd.Index([]), pd.Index([]), 0.0, -2.0,
+        pd.Series([1.0, -0.2]), pd.Series([1.0, -2.0]), "high_vol"
+    )
+    summary = summarize_cpcv([result])
+    assert summary["ruin_flag"] is True
+    assert "forced liquidation" in summary["ruin_note"]
 
 
 def test_run_cpcv_end_to_end_with_trivial_strategy():

@@ -398,12 +398,12 @@ Kedua dataset benchmark dijalankan ulang penuh lewat `validate_csv()` — sekali
 | status / decision | `SUCCESS` / `REJECTED` | `SUCCESS` / `REJECTED` |
 | WF return / Sharpe / DD | +52% / 0,85 / −37% | −2,7% / 0,16 / −49% |
 | OOS return / Sharpe / DD | −10% / −0,34 / −0,36 | −26% / −1,20 / −0,31 |
-| DSR / trials after fixed-registry recompute | **1,0**; raw 5 → valid 5 → effective 1; null 0,0 (DSR no longer kills) | **0,0**; raw 225 → valid 195 → effective 29; null 1,54 → kill total |
+| DSR / trials after fixed-registry full-search recompute | **≈0,0** (`2.43e-12`); raw 75 → valid 65 → effective 13; null 0,91 → DSR kill | **0,0**; raw 225 → valid 195 → effective 29; null 1,54 → kill total |
 | turnover harian | 0,19 | 0,26 |
 | capacity.max_sensible | 100.000 USD | 100.000 USD |
 | data_quality | 43 halt, 0 unexplained, 365 dead | 42 halt, 2 tolerated, 364 dead |
 
-Low_vol_14 recompute memakai registry yang sudah fixed: DSR naik dari 0,175 menjadi 1,0 karena 5 fold dari satu candidate mengelompok sebagai effective-N 1. Sinyal tetap **REJECTED murni via DD** (CPCV train −46%, OOS −37%); ini mengubah jalur riset ke vol-targeting/leverage reduction, bukan membuang sinyal. Vol_adj_momentum_30 tetap REJECTED dari dua arah independen: DSR 0,0 + ruin tak termodel (CPCV DD −200%/−338%, `ruin_flag=true`).
+Low_vol_14 sempat dihitung salah dengan 5 fold sebagai trial. Recompute yang benar memakai seluruh search log: `raw=75`, `valid=65`, `effective=13`, DSR `2.43e-12` (null 0,91). Jadi selection-bias correction tetap membunuh sinyal; verdict juga ditolak oleh DD (CPCV train −46%, OOS −37%). Vol_adj_momentum_30 tetap REJECTED dari dua arah independen: DSR 0,0 + ruin tak termodel (CPCV DD −200%/−338%, `ruin_flag=true`).
 
 Catatan lama (preflight menolak CSV tanpa kolom `signal`) sudah kedaluwarsa: API resmi menyuntik kolom kerja otomatis bila belum ada.
 

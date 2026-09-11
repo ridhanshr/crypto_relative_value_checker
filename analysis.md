@@ -185,14 +185,15 @@ Suite kini **65 test lulus**.
 
 ### 5.3 Kesimpulan recheck
 Mesin kini menemukan (low_vol_14 menang 4/5 fold), menguji (gates + DSR +
-capacity + ensemble), dan membunuh alpha karena DD — bukan karena DSR. Recompute
-dengan registry yang sudah diperbaiki mencatat `raw_n_trials=5`,
-`valid_n_trials=5`, `effective_n_trials=1`, dan `DSR=1.0`. Jadi `DEPLOYABLE False`
-berasal dari DD walk-forward/OOS sekitar −46%/−37%; sinyal bukan lagi kandidat
-yang dibunuh oleh selection bias pada run ini. Jalur berikutnya adalah
-vol-targeting/leverage reduction, bukan membuang low_vol_14 dan mencari signal
-dari nol. Angka DSR fixture bukan typo; test `test_dd_reject_not_downgraded_by_high_dsr`
-mengunci bahwa DSR tinggi tidak boleh menimpa rejection berbasis DD.
+capacity + ensemble), dan membunuh alpha via selection-adjusted DSR serta DD.
+Recompute dengan log search lengkap dan registry yang sudah diperbaiki mencatat
+`raw_n_trials=75`, `valid_n_trials=65`, `effective_n_trials=13`, dan
+`DSR=2.43e-12` (null bar 0,91). Run candidate-only 5-fold sebelumnya salah
+memperlakukan fold sebagai trial dan menghasilkan DSR=1.0; fixture final tidak
+lagi memakai angka salah itu. `DEPLOYABLE False` berasal dari DSR selection-
+adjusted dan DD walk-forward/OOS sekitar −46%/−37%. Test
+`test_dd_reject_not_downgraded_by_high_dsr` memakai DSR=1.0 sebagai input
+sintetis untuk mengunci prioritas gate, bukan klaim metrik low_vol_14.
 
 ## 6. Skenario ideal: validasi sistem di data kotor (71-aset) — TERKUNCI
 
