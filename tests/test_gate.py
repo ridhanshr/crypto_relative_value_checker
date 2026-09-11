@@ -79,28 +79,20 @@ def test_rejected_when_dd_thresholds_exceeded():
     assert d.status == GateStatus.REJECTED and any("OOS" in r for r in d.reasons)
 
 
-def test_rejected_when_dd_thresholds_exceeded():
-    d = evaluate_gate("s", {"dsr": 0.99}, {"sharpe_mean": 1.0, "max_dd_walk_forward": -0.30, "max_dd_oos": -0.05}, None, {}, CFG, data_as_of="2024-01-01")
-    assert d.status == GateStatus.REJECTED and any("walk-forward" in r for r in d.reasons)
-    d = evaluate_gate("s", {"dsr": 0.99}, {"sharpe_mean": 1.0, "max_dd_walk_forward": -0.05, "max_dd_oos": -0.30}, None, {}, CFG, data_as_of="2024-01-01")
-    assert d.status == GateStatus.REJECTED and any("OOS" in r for r in d.reasons)
-
-
 def test_dd_reject_not_downgraded_by_high_dsr():
-    # Regression: a strategy with DSR=1.0 (max confidence) but DD > threshold
-    # must still be REJECTED — DD gate must not be overridden by high DSR.
-    dsr = {"dsr": 1.0, "sharpe_null_bar": 0.0, "observed_sharpe": 0.5}
-    cpcv = {
-        "sharpe_mean": 2.0,
-        "max_dd_walk_forward": -0.30,  # exceeds −25% WF threshold
-        "max_dd_oos": -0.10,
-        "regime_concentration_flag": False,
-    }
-    d = evaluate_gate("s", dsr, cpcv, None, {}, CFG, data_as_of="2024-01-01")
+    # Real low_vol_14 recompute: effective-N=1 makes DSR=1.0, but DD still
+    # rejects. High DSR must never override an independent risk gate.
+    d = evaluate_gate(
+        "low_vol_14_47asset",
+        {"dsr": 1.0},
+        {"sharpe_mean": 0.88, "max_dd_walk_forward": -0.46, "max_dd_oos": -0.37},
+        None,
+        {},
+        CFG,
+        data_as_of="2026-08-31",
+    )
     assert d.status == GateStatus.REJECTED
-    assert any("DD" in r or "drawdown" in r.lower() for r in d.reasons)
-    # Must be REJECTED, not FLAG_REVIEW or APPROVED
-    assert d.status == GateStatus.REJECTED
+    assert any("DD" in reason for reason in d.reasons)
 
 
 def test_flag_review_when_ensemble_correlated_but_dsr_ok():

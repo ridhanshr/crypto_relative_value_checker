@@ -146,6 +146,8 @@ Output utama di folder output: `decision.json` (**selalu ditulis**, atomik, di s
 | `FAILED_VALIDATION` | null | 2 | data tak lolos gerbang; `metrics`/`capacity` null, `errors` terisi, `deployable` false |
 | `CHECKER_ERROR` | null | 1 | crash/bug internal; tanpa klaim riset apa pun |
 
+Exit code policy: `SUCCESS` memakai exit code 0 untuk `APPROVED` maupun `REJECTED`, dan juga untuk `FLAG_REVIEW`, karena evaluasi checker selesai. `REJECTED` adalah keputusan research, bukan kegagalan teknis. Quantara wajib membaca `status`, `decision`, `review_required`, dan `gate_decision`; jangan menyimpulkan dari exit code saja. `FAILED_VALIDATION` memakai 2; `CHECKER_ERROR` memakai 1.
+
 ### 2. Uji satu signal manual
 
 ```bash
@@ -396,12 +398,12 @@ Kedua dataset benchmark dijalankan ulang penuh lewat `validate_csv()` — sekali
 | status / decision | `SUCCESS` / `REJECTED` | `SUCCESS` / `REJECTED` |
 | WF return / Sharpe / DD | +52% / 0,85 / −37% | −2,7% / 0,16 / −49% |
 | OOS return / Sharpe / DD | −10% / −0,34 / −0,36 | −26% / −1,20 / −0,31 |
-| DSR (65 trials) | **0,175** (null 0,92 > observed 0,85 → dibunuh) | **0,0** (null 1,31 → kill total) |
+| DSR / trials after fixed-registry recompute | **1,0**; raw 5 → valid 5 → effective 1; null 0,0 (DSR no longer kills) | **0,0**; raw 225 → valid 195 → effective 29; null 1,54 → kill total |
 | turnover harian | 0,19 | 0,26 |
 | capacity.max_sensible | 100.000 USD | 100.000 USD |
 | data_quality | 43 halt, 0 unexplained, 365 dead | 42 halt, 2 tolerated, 364 dead |
 
-Angka identik dengan recheck lama hingga ULP → fix determinisme tidak menggeser ekonomi, hanya menstabilkan byte. Pemenang berbeda antar universe (low_vol_14 vs vol_adj_momentum_30) = bukti tambahan tidak ada alpha dominan. **Vonis kedua: DEPLOYABLE False.** Ruang pencarian kering di kedua sisi; langkah berikut riset signal/universe baru, bukan tuning.
+Low_vol_14 recompute memakai registry yang sudah fixed: DSR naik dari 0,175 menjadi 1,0 karena 5 fold dari satu candidate mengelompok sebagai effective-N 1. Sinyal tetap **REJECTED murni via DD** (CPCV train −46%, OOS −37%); ini mengubah jalur riset ke vol-targeting/leverage reduction, bukan membuang sinyal. Vol_adj_momentum_30 tetap REJECTED dari dua arah independen: DSR 0,0 + ruin tak termodel (CPCV DD −200%/−338%, `ruin_flag=true`).
 
 Catatan lama (preflight menolak CSV tanpa kolom `signal`) sudah kedaluwarsa: API resmi menyuntik kolom kerja otomatis bila belum ada.
 

@@ -185,12 +185,14 @@ Suite kini **65 test lulus**.
 
 ### 5.3 Kesimpulan recheck
 Mesin kini menemukan (low_vol_14 menang 4/5 fold), menguji (gates + DSR +
-capacity + ensemble), dan membunuh (DSR 0,175, OOS negatif) alpha — tanpa
-bergantung pada satu signal. `DEPLOYABLE False` kali ini lebih kuat dari
-sebelumnya: bukan "strategi merugi", melainkan "tidak ada alpha yang survive
-koreksi multiple-testing di universe ini". Fondasi universe/eksekusi/biaya
-terverifikasi; yang kering adalah ruang pencarian. Langkah berikut adalah
-riset signal/universe baru, bukan tuning — 65 trials sudah cukup menjadi bukti.
+capacity + ensemble), dan membunuh alpha karena DD — bukan karena DSR. Recompute
+dengan registry yang sudah diperbaiki mencatat `raw_n_trials=5`,
+`valid_n_trials=5`, `effective_n_trials=1`, dan `DSR=1.0`. Jadi `DEPLOYABLE False`
+berasal dari DD walk-forward/OOS sekitar −46%/−37%; sinyal bukan lagi kandidat
+yang dibunuh oleh selection bias pada run ini. Jalur berikutnya adalah
+vol-targeting/leverage reduction, bukan membuang low_vol_14 dan mencari signal
+dari nol. Angka DSR fixture bukan typo; test `test_dd_reject_not_downgraded_by_high_dsr`
+mengunci bahwa DSR tinggi tidak boleh menimpa rejection berbasis DD.
 
 ## 6. Skenario ideal: validasi sistem di data kotor (71-aset) — TERKUNCI
 
