@@ -405,7 +405,9 @@ Kedua dataset benchmark dijalankan ulang penuh lewat `validate_csv()` — sekali
 
 Low_vol_14 sempat dihitung salah dengan 5 fold sebagai trial. Recompute yang benar memakai seluruh search log: `raw=75`, `valid=65`, `effective=13`, DSR `2.43e-12` (null 0,91). Jadi selection-bias correction tetap membunuh sinyal; verdict juga ditolak oleh DD (CPCV train −46%, OOS −37%). Vol_adj_momentum_30 tetap REJECTED dari dua arah independen: DSR 0,0 + ruin tak termodel (CPCV DD −200%/−338%, `ruin_flag=true`).
 
-Catatan lama (preflight menolak CSV tanpa kolom `signal`) sudah kedaluwarsa: API resmi menyuntik kolom kerja otomatis bila belum ada.
+Catatan metodologi: `data_mining.observed_sharpe` (0,5128 pada selection path) dan `cpcv_summary.sharpe_mean` (sekitar 0,88 pada rata-rata OOS per-path) mengukur basis berbeda. Yang pertama adalah Sharpe agregat dari jalur pencarian/walk-forward yang dipilih dan dipakai DSR; yang kedua adalah rata-rata Sharpe OOS dari 45 split CPCV purge/embargo. Keduanya tidak boleh dibandingkan sebagai duplikat metrik atau dianggap bug.
+
+Catatan lama (preflight menolak CSV tanpa kolom `signal`) sudah kedaluwarsa: API resmi menyuntik kolom kerja otomatis bila belum ada. Quantara/CI wajib membaca `decision.json` (`status`, `decision`, `review_required`, `gate_decision`), bukan menyimpulkan APPROVED/REJECTED dari exit code.
 
 ## Batasan
 
