@@ -12,6 +12,8 @@ from enum import Enum
 
 class StrategyState(Enum):
     RESEARCH = "RESEARCH"
+    FAILED_VALIDATION = "FAILED_VALIDATION"
+    CHECKER_ERROR = "CHECKER_ERROR"
     REJECTED = "REJECTED"
     FLAG_REVIEW = "FLAG_REVIEW"
     APPROVED_CANDIDATE = "APPROVED_CANDIDATE"
@@ -42,7 +44,7 @@ class StrategyStateMachine:
         if not actor or not timestamp or not reason:
             raise ValueError("state transition requires actor, timestamp, and reason")
         allowed = {
-            StrategyState.RESEARCH: {StrategyState.REJECTED, StrategyState.FLAG_REVIEW, StrategyState.APPROVED_CANDIDATE},
+            StrategyState.RESEARCH: {StrategyState.REJECTED, StrategyState.FLAG_REVIEW, StrategyState.APPROVED_CANDIDATE, StrategyState.FAILED_VALIDATION, StrategyState.CHECKER_ERROR},
             StrategyState.FLAG_REVIEW: {StrategyState.REJECTED, StrategyState.APPROVED_CANDIDATE},
             StrategyState.APPROVED_CANDIDATE: {StrategyState.REJECTED, StrategyState.APPROVED_PAPER},
             StrategyState.APPROVED_PAPER: {StrategyState.REJECTED, StrategyState.APPROVED_LIVE},
@@ -69,8 +71,11 @@ def state_from_validation(envelope, strategy_id, data_as_of, actor="checker"):
     status = envelope.get("status")
     decision = envelope.get("decision")
     review_required = bool(envelope.get("review_required"))
-    if status == "CHECKER_ERROR" or status == "FAILED_VALIDATION":
-        target = StrategyState.REJECTED
+    if status == "CHECKER_ERROR":
+        target = StrategyState.CHECKER_ERROR
+        reason = "checker status CHECKER_ERROR"
+    elif status == "FAILED_VALIDATION":
+        target = StrategyState.FAILED_VALIDATION
         reason = f"checker status {status}"
     elif review_required:
         target = StrategyState.FLAG_REVIEW

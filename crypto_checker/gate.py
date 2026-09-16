@@ -35,9 +35,13 @@ class GateDecision:
 
 def evaluate_gate(strategy_id, dsr_result, cpcv_summary, ensemble_pre_check,
                   capacity_report, config, data_quality_report=None,
-                  data_as_of="", generated_at=None):
+                  data_as_of="", generated_at=None, cpcv_mode="search"):
     reasons = []
     status = GateStatus.APPROVED_CANDIDATE
+
+    if cpcv_mode != "final_validation":
+        reasons.append("Final CPCV validation belum dijalankan")
+        status = GateStatus.REJECTED
 
     dsr = float(dsr_result["dsr"])
     if dsr < config.dsr_reject_threshold:

@@ -19,6 +19,7 @@ metrics/capacity/risk/data_quality population follows the locked table:
 """
 
 import traceback
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -32,6 +33,7 @@ from .schema import SCHEMA_VERSION, DEPLOYABLE_MEANING
 from .io import atomic_write_json
 from .gate import evaluate_gate, GateStatus
 from .data_quality import report_from_preflight
+from .strategy_state import state_from_validation
 
 EXIT_OK = 0
 EXIT_CHECKER_ERROR = 1
@@ -58,6 +60,8 @@ def _envelope(status, decision, deployable, gates, metrics, capacity, risk, data
         "warnings": list(warnings),
         "errors": list(errors),
         "artifacts": dict(artifacts),
+        "strategy_state": None,
+        "state_events": [],
     }
 
 
@@ -71,7 +75,7 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
                  rebalance_every=5, min_train_days=365, test_days=120,
                  ensemble_top_k=3, expected_frequency="D", tolerated_gap_days=1,
                  listing_manifest=None, capacity_aums=None, candidates=None,
-                 strategy_id="strategy", cpcv_mode="search"):
+                 strategy_id="strategy", cpcv_mode="search", config=None):
     """Run the full validation pipeline on a CSV dataset.
 
     Returns the v1.1 result envelope (dict) and always writes
@@ -81,12 +85,23 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
     out.mkdir(parents=True, exist_ok=True)
     artifacts = {"decision": str(out / "decision.json")}
     warnings: list = []
+    cfg = config or CheckerConfig(n_long=n_long, n_short=n_short, fee_rate=fee_rate,
+                                  slippage_rate=slippage_rate, vol_target_annual=vol_target_annual,
+                                  rebalance_every=rebalance_every, cpcv_mode=cpcv_mode)
+    if cpcv_mode not in ("search", "final_validation"):
+        raise ValueError("cpcv_mode must be 'search' or 'final_validation'")
+
+    def write_envelope(envelope, data_as_of="unknown"):
+        state = state_from_validation(envelope, strategy_id, data_as_of)
+        envelope["strategy_state"] = state.state.value
+        envelope["state_events"] = [event.__dict__ for event in state.events]
+        atomic_write_json(out / "decision.json", envelope)
+        return envelope
     try:
         data = pd.read_csv(input_path)
     except Exception as exc:
         envelope = _checker_error_envelope(out, [], [f"CHECKER_ERROR: cannot read input: {exc}"], artifacts)
-        atomic_write_json(out / "decision.json", envelope)
-        return envelope
+        return write_envelope(envelope)
 
     liquidity_col = "quote_volume" if "quote_volume" in data.columns else ""
     require_funding = "funding_rate" in data.columns
@@ -109,12 +124,11 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
         "funding_active_gaps": int(funding_gaps.get("active", 0)),
         "survivorship_missing_dead": int(surv.get("n_missing_dead", 0)),
     }
-    quality_report = report_from_preflight(check, CheckerConfig())
+    quality_report = report_from_preflight(check, cfg)
     if not check.get("valid", False):
         envelope = _envelope("FAILED_VALIDATION", None, False, {}, None, None, {}, quality_report,
                              warnings, [str(e) for e in check.get("errors", [])], artifacts)
-        atomic_write_json(out / "decision.json", envelope)
-        return envelope
+        return write_envelope(envelope, str(pd.to_datetime(data["timestamp"], utc=True).max().date()))
 
     try:
         decision = deployment_decision(
@@ -150,12 +164,10 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
         if liquidity_col:
             cap = capacity_curve(
                 build_signals(data),
-                base_config=CheckerConfig(n_long=best_n, n_short=best_n, fee_rate=fee_rate,
-                                          slippage_rate=slippage_rate, signal_column=best_signal,
-                                          vol_target_annual=vol_target_annual, rebalance_every=rebalance_every,
-                                          require_funding=require_funding, delist_mode="forced_exit",
-                                          liquidity_column=liquidity_col,
-                                          liquidity_tiers=((0.5, 0.0004, 0.0005), (0.0, 0.0015, 0.004))),
+                base_config=replace(cfg, n_long=best_n, n_short=best_n, signal_column=best_signal,
+                                    require_funding=require_funding, delist_mode="forced_exit",
+                                    liquidity_column=liquidity_col,
+                                    liquidity_tiers=((0.5, 0.0004, 0.0005), (0.0, 0.0015, 0.004))),
                 aum_levels=capacity_aums,
                 output_dir=str(out / "capacity"),
             )
@@ -171,9 +183,7 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
                                   metrics, capacity, risk, quality_report, warnings, [], artifacts))
         # v2 automated gate (search mode: summary from validation segments;
         # final_validation: full CPCV budget on the best config, once).
-        gate_cfg = CheckerConfig(n_long=best_n, n_short=best_n, fee_rate=fee_rate,
-                                 slippage_rate=slippage_rate, vol_target_annual=vol_target_annual,
-                                 rebalance_every=rebalance_every)
+        gate_cfg = cfg
         dm = decision.get("data_mining") or {}
         dsr_result = {"dsr": dm.get("dsr", 0.0), "sharpe_null_bar": dm.get("expected_sharpe_null", 0.0),
                       "observed_sharpe": float(wf_summary["sharpe"]),
@@ -186,10 +196,8 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
             from .cpcv import run_cpcv, summarize_cpcv
             from .core import check_strategy
             built = build_signals(data)
-            best_cfg = CheckerConfig(n_long=best_n, n_short=best_n, fee_rate=fee_rate,
-                                     slippage_rate=slippage_rate, signal_column=best_signal,
-                                     vol_target_annual=vol_target_annual, rebalance_every=rebalance_every,
-                                     require_funding=require_funding, delist_mode="forced_exit")
+            best_cfg = replace(cfg, n_long=best_n, n_short=best_n, signal_column=best_signal,
+                               require_funding=require_funding, delist_mode="forced_exit")
 
             def _strategy(train_frame, test_frame):
                 tr = check_strategy(train_frame, best_cfg)
@@ -214,8 +222,9 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
                     for lvl in cap.get("levels", [])} if liquidity_col else {}
         dq_gate = quality_report
         gate = evaluate_gate(strategy_id, dsr_result, cpcv_summary, ens_pre, cap_gate,
-                             gate_cfg, data_quality_report=dq_gate,
-                             data_as_of=str(pd.to_datetime(data["timestamp"], utc=True).max().date()))
+                              gate_cfg, data_quality_report=dq_gate,
+                              data_as_of=str(pd.to_datetime(data["timestamp"], utc=True).max().date()),
+                              cpcv_mode=cpcv_mode)
         gate_block = {"status": gate.status.value, "reasons": gate.reasons,
                       "reviewed_by": gate.reviewed_by, "review_decision": gate.review_decision,
                       "review_timestamp": gate.review_timestamp}
@@ -228,10 +237,8 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
             verdict, deployable_final = "APPROVED", bool(decision["deployable"])
         envelope.update({"decision": verdict, "deployable": deployable_final,
                          "review_required": bool(review_required), "gate_decision": gate_block})
-        atomic_write_json(out / "decision.json", envelope)
-        return envelope
+        return write_envelope(envelope, str(pd.to_datetime(data["timestamp"], utc=True).max().date()))
     except Exception as exc:
         trace = traceback.format_exc(limit=5)
         envelope = _checker_error_envelope(out, warnings, [f"CHECKER_ERROR: {type(exc).__name__}: {exc}", trace], artifacts, data_quality)
-        atomic_write_json(out / "decision.json", envelope)
-        return envelope
+        return write_envelope(envelope)
