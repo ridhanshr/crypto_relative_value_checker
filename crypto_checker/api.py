@@ -19,6 +19,8 @@ metrics/capacity/risk/data_quality population follows the locked table:
 """
 
 import traceback
+import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -88,17 +90,40 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
     cfg = config or CheckerConfig(n_long=n_long, n_short=n_short, fee_rate=fee_rate,
                                   slippage_rate=slippage_rate, vol_target_annual=vol_target_annual,
                                   rebalance_every=rebalance_every, cpcv_mode=cpcv_mode)
-    if cpcv_mode not in ("search", "final_validation"):
-        raise ValueError("cpcv_mode must be 'search' or 'final_validation'")
+    cpcv_mode = cfg.cpcv_mode if config is not None else cpcv_mode
+
+    def digest(value):
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    artifacts["input_sha256"] = None
+    artifacts["config_sha256"] = digest(json.dumps(cfg.__dict__, sort_keys=True, default=str))
 
     def write_envelope(envelope, data_as_of="unknown"):
         state = state_from_validation(envelope, strategy_id, data_as_of)
         envelope["strategy_state"] = state.state.value
         envelope["state_events"] = [event.__dict__ for event in state.events]
+        envelope["provenance"] = {
+            "run_id": digest(json.dumps({"input_sha256": artifacts.get("input_sha256"),
+                                          "config_sha256": artifacts["config_sha256"],
+                                          "strategy_id": strategy_id}, sort_keys=True)),
+            "input_sha256": artifacts.get("input_sha256"),
+            "config_sha256": artifacts["config_sha256"],
+            "checker_schema_version": SCHEMA_VERSION,
+        }
         atomic_write_json(out / "decision.json", envelope)
         return envelope
+
+    def data_as_of(value):
+        try:
+            parsed = pd.to_datetime(value, utc=True, errors="coerce").dropna()
+            return str(parsed.max().date()) if len(parsed) else "unknown"
+        except Exception:
+            return "unknown"
     try:
+        if cpcv_mode not in ("search", "final_validation"):
+            raise ValueError("cpcv_mode must be 'search' or 'final_validation'")
         data = pd.read_csv(input_path)
+        artifacts["input_sha256"] = hashlib.sha256(Path(input_path).read_bytes()).hexdigest()
     except Exception as exc:
         envelope = _checker_error_envelope(out, [], [f"CHECKER_ERROR: cannot read input: {exc}"], artifacts)
         return write_envelope(envelope)
@@ -128,14 +153,14 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
     if not check.get("valid", False):
         envelope = _envelope("FAILED_VALIDATION", None, False, {}, None, None, {}, quality_report,
                              warnings, [str(e) for e in check.get("errors", [])], artifacts)
-        return write_envelope(envelope, str(pd.to_datetime(data["timestamp"], utc=True).max().date()))
+        return write_envelope(envelope, data_as_of(data.get("timestamp", [])))
 
     try:
         decision = deployment_decision(
             data, output_dir=str(out), min_train_days=min_train_days, test_days=test_days,
             candidates=candidates, n_sides_grid=(n_long,), vol_target_annual=vol_target_annual, rebalance_every=rebalance_every,
-            fee_rate=fee_rate, slippage_rate=slippage_rate, require_funding=require_funding,
-            delist_mode="forced_exit", ensemble_top_k=ensemble_top_k,
+            fee_rate=cfg.fee_rate, slippage_rate=cfg.slippage_rate, require_funding=cfg.require_funding,
+            delist_mode=cfg.delist_mode, ensemble_top_k=ensemble_top_k, base_config=cfg,
         )
         artifacts["deployment_decision"] = str(out / "deployment_decision.json")
         artifacts["walk_forward"] = str(out / "walk_forward.json")
@@ -173,7 +198,9 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
             )
             artifacts["capacity"] = str(out / "capacity" / "capacity_curve.json")
             sensible = [lvl["aum"] for lvl in cap.get("levels", []) if lvl.get("sensible")]
-            capacity = {"max_sensible": float(max(sensible)) if sensible else None, "status": cap.get("status", "ok")}
+            capacity = {"max_sensible": float(max(sensible)) if sensible else None,
+                        "status": cap.get("status", "ok"),
+                        "deployment_limit": cfg.capacity_max_deployment_aum}
         else:
             capacity = {"max_sensible": None, "status": "no_liquidity_data"}
             warnings.append("Capacity not computed: no volume column; max_sensible is null, not zero")
@@ -223,7 +250,7 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
         dq_gate = quality_report
         gate = evaluate_gate(strategy_id, dsr_result, cpcv_summary, ens_pre, cap_gate,
                               gate_cfg, data_quality_report=dq_gate,
-                              data_as_of=str(pd.to_datetime(data["timestamp"], utc=True).max().date()),
+                              data_as_of=data_as_of(data.get("timestamp", [])),
                               cpcv_mode=cpcv_mode)
         gate_block = {"status": gate.status.value, "reasons": gate.reasons,
                       "reviewed_by": gate.reviewed_by, "review_decision": gate.review_decision,
@@ -237,7 +264,7 @@ def validate_csv(input_path, output_dir="reports/validation_run", n_long=3, n_sh
             verdict, deployable_final = "APPROVED", bool(decision["deployable"])
         envelope.update({"decision": verdict, "deployable": deployable_final,
                          "review_required": bool(review_required), "gate_decision": gate_block})
-        return write_envelope(envelope, str(pd.to_datetime(data["timestamp"], utc=True).max().date()))
+        return write_envelope(envelope, data_as_of(data.get("timestamp", [])))
     except Exception as exc:
         trace = traceback.format_exc(limit=5)
         envelope = _checker_error_envelope(out, warnings, [f"CHECKER_ERROR: {type(exc).__name__}: {exc}", trace], artifacts, data_quality)

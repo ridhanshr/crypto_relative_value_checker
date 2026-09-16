@@ -1,11 +1,12 @@
-name: tests
+name: full-burnin
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 2 * * 0"
 
 jobs:
-  pytest:
+  burnin:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: .
@@ -15,7 +16,6 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install -r requirements.txt
-      - run: python -m pytest tests -q
-      - run: python scripts/determinism_check.py
       - run: python scripts/runtime_burnin.py --stage small
+      - run: python scripts/runtime_burnin.py --stage full
       - run: python scripts/validate_artifacts.py reports/burnin

@@ -58,6 +58,7 @@ class CheckerConfig:
     capacity_adv_lookback_days: int = 90
     capacity_adv_exclude_outlier_days: bool = True
     capacity_min_headroom: float = 1.5
+    capacity_max_deployment_aum: float | None = None
     # --- v2 drawdown gate ---
     dd_max_threshold_wf: float = -0.25
     dd_max_threshold_oos: float = -0.20

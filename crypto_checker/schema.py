@@ -141,6 +141,9 @@ SCHEMAS = {
         "warnings": "list",
         "errors": "list",
         "artifacts": "dict",
+        "strategy_state": "str",
+        "state_events": "list",
+        "provenance": "dict",
     },
     "metrics": {
         "wf_total_return": "num",
@@ -181,4 +184,13 @@ def validate_output_schema(artifact, kind):
             errors.append(f"bad status: {artifact.get('status')!r}")
         if artifact.get("decision") not in ("APPROVED", "REJECTED", None):
             errors.append(f"bad decision: {artifact.get('decision')!r}")
+        states = {"RESEARCH", "FAILED_VALIDATION", "CHECKER_ERROR", "REJECTED", "FLAG_REVIEW", "APPROVED_CANDIDATE", "APPROVED_PAPER", "APPROVED_LIVE"}
+        if artifact.get("strategy_state") not in states:
+            errors.append(f"bad strategy_state: {artifact.get('strategy_state')!r}")
+        for i, event in enumerate(artifact.get("state_events", [])):
+            if not isinstance(event, dict):
+                errors.append(f"state_events[{i}]: expected dict")
+                continue
+            errors.extend(_check(event, {"from_state": "str", "to_state": "str", "actor": "str", "timestamp": "str", "reason": "str"}, prefix=f"state_events[{i}]."))
+        errors.extend(_check(artifact.get("provenance", {}), {"run_id": "str", "input_sha256": "str?", "config_sha256": "str", "checker_schema_version": "num"}, prefix="provenance."))
     return errors

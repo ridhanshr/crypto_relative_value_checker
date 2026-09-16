@@ -35,9 +35,13 @@ class GateDecision:
 
 def evaluate_gate(strategy_id, dsr_result, cpcv_summary, ensemble_pre_check,
                   capacity_report, config, data_quality_report=None,
-                  data_as_of="", generated_at=None, cpcv_mode="search"):
+                  data_as_of="", generated_at=None, cpcv_mode="final_validation"):
     reasons = []
     status = GateStatus.APPROVED_CANDIDATE
+
+    if config.capacity_max_deployment_aum is not None and not capacity_report:
+        reasons.append("Configured deployment AUM limit requires capacity report")
+        status = GateStatus.REJECTED
 
     if cpcv_mode != "final_validation":
         reasons.append("Final CPCV validation belum dijalankan")
@@ -79,6 +83,9 @@ def evaluate_gate(strategy_id, dsr_result, cpcv_summary, ensemble_pre_check,
         if isinstance(report, dict) and report.get("status") == "BREACH":
             reasons.append(f"Capacity breach di AUM tier {tier}")
             # Breach records an AUM constraint, never a kill by itself.
+        if config.capacity_max_deployment_aum is not None and float(tier) > config.capacity_max_deployment_aum:
+            reasons.append(f"AUM tier {tier} exceeds configured deployment limit {config.capacity_max_deployment_aum}")
+            status = GateStatus.REJECTED
 
     if data_quality_report is not None:
         unexplained = int(data_quality_report.get("halt_unexplained_count", 0))

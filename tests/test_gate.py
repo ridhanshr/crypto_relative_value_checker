@@ -130,3 +130,17 @@ def test_data_quality_does_not_downgrade_existing_rejected_status():
     d = evaluate_gate("s", {"dsr": 0.1}, {"sharpe_mean": 1.0, "max_dd_walk_forward": -0.05, "max_dd_oos": -0.05}, None, {}, CFG,
                       data_quality_report=dq, data_as_of="2024-01-01")
     assert d.status == GateStatus.REJECTED
+
+
+def test_search_cpcv_cannot_approve():
+    d = evaluate_gate("s", {"dsr": 0.99}, {"sharpe_mean": 1.0, "max_dd_walk_forward": -0.05, "max_dd_oos": -0.05}, None, {}, CFG,
+                      data_as_of="2024-01-01", cpcv_mode="search")
+    assert d.status == GateStatus.REJECTED
+    assert any("Final CPCV" in reason for reason in d.reasons)
+
+
+def test_capacity_limit_requires_capacity_report():
+    config = CheckerConfig(capacity_max_deployment_aum=100000.0)
+    d = evaluate_gate("s", {"dsr": 0.99}, {"sharpe_mean": 1.0, "max_dd_walk_forward": -0.05, "max_dd_oos": -0.05}, None, {}, config)
+    assert d.status == GateStatus.REJECTED
+    assert any("capacity report" in reason for reason in d.reasons)

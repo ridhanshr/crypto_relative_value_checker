@@ -1202,8 +1202,11 @@ def test_envelope_approved_shape_and_exit_codes():
                     "wf_total_return": 0.52, "wf_sharpe": 0.85, "wf_drawdown": -0.37,
                     "oos_total_return": -0.04, "oos_sharpe": -0.22, "oos_drawdown": -0.18,
                     "dsr": 0.175, "turnover_daily": 0.08},
-                "capacity": {"max_sensible": 100000.0, "status": "ok"}, "risk": {}, "data_quality": {},
-                "warnings": [], "errors": [], "artifacts": {}}
+                 "capacity": {"max_sensible": 100000.0, "status": "ok"}, "risk": {}, "data_quality": {},
+                 "warnings": [], "errors": [], "artifacts": {},
+                 "strategy_state": "APPROVED_CANDIDATE", "state_events": [],
+                 "provenance": {"run_id": "r", "input_sha256": None,
+                                "config_sha256": "c", "checker_schema_version": 1}}
     assert validate_output_schema(approved, "result") == []
     assert STATUS_FOR_EXIT == {"SUCCESS": 0, "FAILED_VALIDATION": 2, "CHECKER_ERROR": 1}
 
